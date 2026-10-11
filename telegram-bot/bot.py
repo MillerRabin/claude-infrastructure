@@ -226,6 +226,7 @@ class Bot:
         self.sid_locks = collections.defaultdict(threading.Lock)
         self.procs = {}
         self.bot_prompts = collections.defaultdict(collections.deque)   # prompts sent through Telegram
+        self.backoff = {}                                               # group -> time before which it is skipped
         self.stop = threading.Event()
 
     # ---- topics -----------------------------------------------------------------
@@ -313,6 +314,8 @@ class Bot:
             return
         now = time.time()
         for g in self.cfg.groups:
+            if self.backoff.get(g.name, 0) > now:
+                continue
             made = 0                                  # at most 3 new topics per group and cycle
             for path in glob.glob(os.path.join(g.transcripts, "*.jsonl")):
                 sid = os.path.basename(path)[:-6]
@@ -325,7 +328,9 @@ class Bot:
                         made += 1
                     self.tail(g, sid, st, path)
                 except TGError as e:
-                    log.warning("mirror %s/%s: %s", g.name, sid[:8], e)
+                    log.warning("mirror %s/%s: %s (group paused for 60 s)", g.name, sid[:8], e)
+                    self.backoff[g.name] = time.time() + 60
+                    break
                 except Exception:
                     log.exception("mirror %s/%s", g.name, sid[:8])
 
