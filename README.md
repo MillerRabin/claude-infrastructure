@@ -1,39 +1,39 @@
 # claude-infrastructure
 
-Инфраструктура для Claude Code: автозапуск двух сессий в tmux при старте системы (Armbian / Debian, systemd).
+Infrastructure for Claude Code: starts two Claude sessions in tmux automatically at boot (Armbian / Debian, systemd).
 
-| tmux-сессия | каталог запуска            | аккаунт Claude                 |
-|-------------|----------------------------|--------------------------------|
-| `namesilo`  | `~/projects/NameSilo`      | основной (`~/.claude`)         |
-| `personal`  | `~/projects/millerrabin`   | второй (`CLAUDE_CONFIG_DIR=~/.claude-2`) |
+| tmux session | working directory          | Claude account                              |
+|--------------|----------------------------|---------------------------------------------|
+| `namesilo`   | `~/projects/NameSilo`      | primary (`~/.claude`)                       |
+| `personal`   | `~/projects/millerrabin`   | secondary (`CLAUDE_CONFIG_DIR=~/.claude-2`) |
 
-Оба Claude запускаются с `--resume` (открывается список сессий каталога).
+Both sessions start Claude with `--resume`, which opens the list of sessions for the directory.
 
-## Файлы
+## Files
 
-- `bin/claude-tmux-start` — создаёт недостающие сессии (идемпотентно).
-- `bin/cl1`, `bin/cl2` — подключиться к `namesilo` / `personal` (создаёт, если нет).
-- `systemd/claude-tmux.service` — запускает `claude-tmux-start` при загрузке от пользователя `millerrabin`.
+- `bin/claude-tmux-start` creates any missing sessions (idempotent).
+- `bin/cl1`, `bin/cl2` attach to `namesilo` / `personal` (creating the session if it does not exist).
+- `systemd/claude-tmux.service` runs `claude-tmux-start` at boot as the user `millerrabin`.
 
-## Установка
+## Installation
 
 ```bash
 install -m 755 bin/* ~/.local/bin/
-sudo ln -sfn ~/.local/bin/cl1 /usr/local/bin/cl1   # чтобы работало при `ssh host cl1`
+sudo ln -sfn ~/.local/bin/cl1 /usr/local/bin/cl1   # so that `ssh host cl1` works
 sudo ln -sfn ~/.local/bin/cl2 /usr/local/bin/cl2
 sudo cp systemd/claude-tmux.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now claude-tmux.service
 ```
 
-В `claude-tmux.service` поправьте `User`, `Group`, `HOME` и пути под своего пользователя.
+Edit `User`, `Group`, `HOME` and the paths in `claude-tmux.service` to match your user.
 
-## Использование
+## Usage
 
 ```bash
-ssh -t user@host cl1        # сессия namesilo
-ssh -t user@host cl2        # сессия personal
+ssh -t user@host cl1        # session namesilo
+ssh -t user@host cl2        # session personal
 ```
 
-Отключиться, не останавливая Claude: `Ctrl+b`, затем `d`.
-Перезапуск: `sudo systemctl restart claude-tmux` (закрывает обе сессии и поднимает заново).
-Только досоздать недостающие: `claude-tmux-start`.
+Detach without stopping Claude: `Ctrl+b`, then `d`.
+Restart: `sudo systemctl restart claude-tmux` (closes both sessions and starts them again).
+Create only the missing sessions: `claude-tmux-start`.
