@@ -256,6 +256,34 @@ class Bot:
         except TGError as e:
             log.warning("cannot recreate topic: %s", e)
 
+    def topic_exists(self, group, thread):
+        """None when Telegram could not tell (rate limit etc.)."""
+        try:
+            self.tg.call("sendChatAction", _timeout=15, chat_id=group.chat_id, message_thread_id=thread, action="typing")
+            return True
+        except TGError as e:
+            if "thread not found" in e.description.lower() or "topic_id_invalid" in e.description.lower():
+                return False
+            return None
+
+    def resync_group(self, group):
+        """Recreate the topics that were deleted in Telegram. Returns (checked, recreated, unknown)."""
+        topics, recreated, unknown = self.state.topics(group.name), 0, 0
+        for sid, st in list(topics.items()):
+            alive = self.topic_exists(group, st["thread"])
+            time.sleep(0.4)
+            if alive is None:
+                unknown += 1
+            elif not alive:
+                self.recreate_topic(group, sid, st)
+                try:
+                    self.tg.send(group.chat_id, "Тема восстановлена (сессия %s). Прежние сообщения темы в Telegram потеряны, "
+                                 "сессия цела." % sid[:8], st["thread"])
+                except TGError as e:
+                    log.warning("resync notice: %s", e)
+                recreated += 1
+        return len(topics), recreated, unknown
+
     def send_topic(self, group, sid, st, text):
         try:
             self.tg.send(group.chat_id, text, st["thread"])
@@ -447,11 +475,14 @@ class Bot:
         args = text.split()[1:]
         if cmd == "/help":
             self.reply(msg, "В теме: текст продолжает сессию.\n/mode full|safe — права Claude\n/stop — прервать запуск\n"
-                            "В General: текст начинает новую сессию.\n/sessions — недавние сессии\n/open <id> — создать тему для сессии")
+                            "В General: текст начинает новую сессию.\n/sessions — недавние сессии\n/open <id> — создать тему для сессии\n/resync — восстановить удалённые темы")
         elif cmd == "/sessions":
             self.cmd_sessions(group, msg)
         elif cmd == "/open":
             self.cmd_open(group, msg, args)
+        elif cmd == "/resync":
+            checked, recreated, unknown = self.resync_group(group)
+            self.reply(msg, "Проверено тем: %d, восстановлено: %d, не удалось проверить: %d." % (checked, recreated, unknown))
         elif cmd == "/mode" and thread:
             sid = self.find_sid(group, thread)
             st = self.state.topics(group.name).get(sid) if sid else None

@@ -22,6 +22,7 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
 - Use `/mode safe` in a topic (or `default_mode = "safe"`) to restrict Claude to the read-only tools `Read`, `Glob`, `Grep`.
 - The systemd unit sets `NoNewPrivileges=yes`, so Claude cannot use `sudo`.
 - Do not use the same session in Telegram and in tmux at the same time: both would append to the same file.
+- Deleting a topic in Telegram only removes its messages there. The session files stay on the machine, `/resync` recreates the topic.
 - Enable two-step verification on the Telegram account that is allowed to control the bot.
 
 ## Setup
@@ -57,6 +58,7 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
 | General | any text | start a new session and create its topic |
 | General | `/sessions` | list recent sessions (● has a topic, ○ has not) |
 | General | `/open <id>` | create a topic for an older session (first characters of the id are enough) |
+| General | `/resync` | check every known topic and recreate the ones deleted in Telegram (old messages of a deleted topic cannot be recovered; the Claude session is intact) |
 | anywhere | `/help`, `/whoami` | help, ids |
 
 ## How it works

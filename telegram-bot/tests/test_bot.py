@@ -22,6 +22,7 @@ USER, OTHER, CHAT = 111, 222, -1001
 class FakeTelegram:
     def __init__(self):
         self.calls, self.updates, self.next_thread, self.next_update = [], queue.Queue(), 100, 1
+        self.deleted = set()
         fake = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -31,8 +32,11 @@ class FakeTelegram:
             def do_POST(self):
                 method = self.path.rsplit("/", 1)[-1]
                 params = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
-                result = fake.handle(method, params)
-                body = json.dumps({"ok": True, "result": result}).encode()
+                if params.get("message_thread_id") in fake.deleted and method != "createForumTopic":
+                    body = json.dumps({"ok": False, "error_code": 400,
+                                       "description": "Bad Request: message thread not found"}).encode()
+                else:
+                    body = json.dumps({"ok": True, "result": fake.handle(method, params)}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -224,6 +228,18 @@ class BotTest(unittest.TestCase):
         args = self.last_args()
         self.assertNotIn("--dangerously-skip-permissions", args)
         self.assertIn("--allowedTools", args)
+
+    def test_resync_recreates_deleted_topic(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.deleted.add(thread)                       # the user deleted the topic in Telegram
+        self.tg.say(USER, "/resync")                      # General topic
+        self.wait(lambda: len(self.tg.topics()) == 2, "topic recreated")
+        new = self.bot.state.topics("g")["aaaaaaaa-0000-0000-0000-000000000001"]["thread"]
+        self.assertNotEqual(new, thread)
+        self.wait(lambda: any("восстановлено: 1" in t for t in self.tg.sent(None)), "summary reply")
+        self.wait(lambda: any("Тема восстановлена" in t for t in self.tg.sent(new)), "notice in new topic")
 
     def test_other_users_are_ignored(self):
         self.start()
