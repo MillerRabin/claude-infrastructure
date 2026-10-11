@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Claude №2 (второй аккаунт, отдельный CLAUDE_CONFIG_DIR), tmux-сессия claude2
+exec tmux new -A -s personal -c "$HOME/projects/millerrabin" "env CLAUDE_CONFIG_DIR=$HOME/.claude-2 $HOME/.local/bin/claude --resume; exec bash"

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Поднимает tmux-сессии Claude (идемпотентно): namesilo (аккаунт №1) и personal (аккаунт №2)
+CLAUDE="$HOME/.local/bin/claude"
+if ! tmux has-session -t namesilo 2>/dev/null; then
+  tmux new-session -d -s namesilo -c "$HOME/projects/NameSilo" "$CLAUDE --resume; exec bash"
+fi
+if ! tmux has-session -t personal 2>/dev/null; then
+  tmux new-session -d -s personal -c "$HOME/projects/millerrabin" "env CLAUDE_CONFIG_DIR=$HOME/.claude-2 $CLAUDE --resume; exec bash"
+fi
