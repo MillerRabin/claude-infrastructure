@@ -472,6 +472,8 @@ class Bot:
                 self.reply(msg, "Группы: " + ", ".join("%s (%s)" % (g.name, g.chat_id) for g in self.cfg.groups))
             return
         thread = msg.get("message_thread_id")
+        if thread == 1:                               # id of the General topic
+            thread = None
         args = text.split()[1:]
         if cmd == "/help":
             self.reply(msg, "В теме: текст продолжает сессию.\n/mode full|safe — права Claude\n/stop — прервать запуск\n"
@@ -504,8 +506,15 @@ class Bot:
             sid = self.find_sid(group, thread)
             if sid:
                 self.run_claude(group, sid, self.state.topics(group.name)[sid], text)
-            else:
-                self.reply(msg, "Эта тема не связана с сессией Claude.")
+            else:                                     # a topic created by hand: bind a new session to it
+                sid = str(uuid.uuid4())
+                made = ((msg.get("reply_to_message") or {}).get("forum_topic_created") or {}).get("name") or ""
+                st = {"thread": thread, "pos": 0, "title": short(made, 100), "mode": self.cfg.default_mode, "events": 0}
+                with self.state.lock:
+                    self.state.topics(group.name)[sid] = st
+                self.state.save()
+                log.info("new session bound to a manual topic group=%s session=%s", group.name, sid[:8])
+                self.run_claude(group, sid, st, text, new=True)
         else:                                         # General: a new session
             sid = str(uuid.uuid4())
             st = self.create_topic(group, sid, short(text, 60), 0)

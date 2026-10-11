@@ -217,6 +217,28 @@ class BotTest(unittest.TestCase):
         args = self.last_args()
         self.assertIn("--session-id", args)
 
+    def test_message_in_manual_topic_starts_session_bound_to_it(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "initial topic")
+        before = len(self.tg.topics())
+        self.tg.say(USER, "hello from a topic I made", thread=777)   # thread 777 was created by hand
+        self.wait(lambda: any("echo: hello from a topic I made" in t for t in self.tg.sent(777)), "answer in the same topic")
+        self.assertEqual(len(self.tg.topics()), before, "no extra topic must be created")
+        self.assertIn("--session-id", self.last_args())
+        bound = [sid for sid, st in self.bot.state.topics("g").items() if st["thread"] == 777]
+        self.assertEqual(len(bound), 1)
+        self.tg.say(USER, "and a follow-up", thread=777)             # now it is an ordinary topic: --resume
+        self.wait(lambda: any("echo: and a follow-up" in t for t in self.tg.sent(777)), "follow-up answer")
+        self.assertIn("--resume", self.last_args())
+        self.assertIn(bound[0], self.last_args())
+
+    def test_general_topic_id_one_is_not_a_session_topic(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "initial topic")
+        self.tg.say(USER, "text in General sent with thread id 1", thread=1)
+        self.wait(lambda: "text in General sent with thread id 1" in self.tg.topics(), "new topic from General")
+        self.assertFalse([1 for st in self.bot.state.topics("g").values() if st["thread"] == 1])
+
     def test_mode_safe_changes_flags(self):
         self.start()
         self.wait(lambda: self.tg.topics(), "topic created")

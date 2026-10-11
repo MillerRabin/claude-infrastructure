@@ -9,7 +9,8 @@ you continue them from the phone.
 - **Mirroring:** every new message of every session is posted into its topic: your prompts (`👤`), Claude's answers (`🤖`)
   and tool calls (`🔧`). This includes what you type in the tmux session on the machine itself. History is not replayed.
 - **Writing:** a message in a topic continues that session with `claude -p --resume <id>`. A message in the group's
-  General topic starts a **new** session (and creates its topic).
+  General topic starts a **new** session (and creates its topic); a message in a topic you created by hand starts a new
+  session bound to that topic.
 - Only the Telegram user ids in `allowed_user_ids` can do anything. Everybody else is ignored silently.
 
 ## Security: read this first
@@ -53,6 +54,7 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
 | Where | Command | Effect |
 |---|---|---|
 | topic | any text | continue the session |
+| a topic you created yourself | any text | starts a **new** session bound to that topic (then it is an ordinary topic) |
 | topic | `/mode full\|safe` | full access / read-only (per topic) |
 | topic | `/stop` | kill the running `claude` for this session |
 | General | any text | start a new session and create its topic |
