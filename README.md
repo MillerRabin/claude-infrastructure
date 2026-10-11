@@ -37,3 +37,9 @@ ssh -t user@host personal   # session personal
 Detach without stopping Claude: `Ctrl+b`, then `d`.
 Restart: `sudo systemctl restart claude-tmux` (closes both sessions and starts them again).
 Create only the missing sessions: `claude-tmux-start`.
+
+## Telegram bot
+
+[`telegram-bot/`](telegram-bot) is a Telegram front-end for both Claude accounts: one supergroup per account, one topic per
+session, mirroring of new messages and the ability to continue a session from the phone. See
+[`telegram-bot/README.md`](telegram-bot/README.md) (read the security section first).

@@ -1,0 +1,22 @@
+# ~/.config/claude-tg/config.toml  (mode 600)
+token_file = "~/.config/claude-tg/token"      # the BotFather token, created by hand, never committed
+allowed_user_ids = []                          # your Telegram user id(s). EMPTY = setup mode: only /whoami works
+recent_days = 7                                # sessions active in the last N days get a topic automatically
+mirror_tools = true                            # also show "🔧 Bash: ..." lines for tool calls
+default_mode = "full"                          # full = --dangerously-skip-permissions, safe = read-only tools
+run_timeout_seconds = 3600
+claude_bin = "~/.local/bin/claude"
+state_file = "~/.local/state/claude-tg/state.json"
+
+# One supergroup with Topics enabled per Claude account. Fill chat_id from /whoami.
+[[groups]]
+name = "namesilo"
+chat_id = -1000000000000
+config_dir = "~/.claude"
+project_dir = "~/projects/NameSilo"
+
+[[groups]]
+name = "personal"
+chat_id = -1000000000001
+config_dir = "~/.claude-2"
+project_dir = "~/projects/millerrabin"

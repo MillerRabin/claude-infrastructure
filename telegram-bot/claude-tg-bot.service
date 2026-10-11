@@ -1,0 +1,19 @@
+[Unit]
+Description=Telegram front-end for Claude Code sessions
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/millerrabin/.config/claude-tg/token
+
+[Service]
+User=millerrabin
+Group=millerrabin
+Environment=HOME=/home/millerrabin
+WorkingDirectory=/home/millerrabin
+ExecStart=/usr/bin/python3 /home/millerrabin/claude-tg-bot/bot.py /home/millerrabin/.config/claude-tg/config.toml
+Restart=always
+RestartSec=10
+# Claude runs with full permissions: do not let it gain more (no sudo / setuid)
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
