@@ -1,6 +1,6 @@
-# claude-tmux-autostart
+# claude-infrastructure
 
-Автозапуск двух сессий Claude Code в tmux при старте системы (Armbian / Debian, systemd).
+Инфраструктура для Claude Code: автозапуск двух сессий в tmux при старте системы (Armbian / Debian, systemd).
 
 | tmux-сессия | каталог запуска            | аккаунт Claude                 |
 |-------------|----------------------------|--------------------------------|
