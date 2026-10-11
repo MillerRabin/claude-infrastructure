@@ -311,8 +311,9 @@ class Bot:
     def mirror_once(self):
         if not self.cfg.allowed:                      # setup mode: nothing is mirrored
             return
-        now, made = time.time(), 0
+        now = time.time()
         for g in self.cfg.groups:
+            made = 0                                  # at most 3 new topics per group and cycle
             for path in glob.glob(os.path.join(g.transcripts, "*.jsonl")):
                 sid = os.path.basename(path)[:-6]
                 st = self.state.topics(g.name).get(sid)
