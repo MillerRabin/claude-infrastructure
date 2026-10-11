@@ -12,15 +12,15 @@ Both sessions start Claude with `--resume`, which opens the list of sessions for
 ## Files
 
 - `bin/claude-tmux-start` creates any missing sessions (idempotent).
-- `bin/cl1`, `bin/cl2` attach to `namesilo` / `personal` (creating the session if it does not exist).
+- `bin/namesilo`, `bin/personal` attach to the tmux sessions with the same name (creating the session if it does not exist).
 - `systemd/claude-tmux.service` runs `claude-tmux-start` at boot as the user `millerrabin`.
 
 ## Installation
 
 ```bash
 install -m 755 bin/* ~/.local/bin/
-sudo ln -sfn ~/.local/bin/cl1 /usr/local/bin/cl1   # so that `ssh host cl1` works
-sudo ln -sfn ~/.local/bin/cl2 /usr/local/bin/cl2
+sudo ln -sfn ~/.local/bin/namesilo /usr/local/bin/namesilo   # so that `ssh host namesilo` works
+sudo ln -sfn ~/.local/bin/personal /usr/local/bin/personal
 sudo cp systemd/claude-tmux.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now claude-tmux.service
 ```
@@ -30,8 +30,8 @@ Edit `User`, `Group`, `HOME` and the paths in `claude-tmux.service` to match you
 ## Usage
 
 ```bash
-ssh -t user@host cl1        # session namesilo
-ssh -t user@host cl2        # session personal
+ssh -t user@host namesilo   # session namesilo
+ssh -t user@host personal   # session personal
 ```
 
 Detach without stopping Claude: `Ctrl+b`, then `d`.
