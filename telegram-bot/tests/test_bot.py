@@ -95,6 +95,8 @@ FAKE_CLAUDE = textwrap.dedent('''\
             {"type": "text", "text": "echo: " + prompt.strip()}]}}) + "\\n")
     with open(os.environ["FAKE_ARGS_LOG"], "a") as f:
         f.write(json.dumps(args) + "\\n")
+    with open(os.environ["FAKE_ARGS_LOG"] + ".prompts", "a") as f:
+        f.write(prompt.strip() + "\\n")
     print(json.dumps({"type": "result", "is_error": False, "result": "echo: " + prompt.strip(), "session_id": sid}))
 ''')
 
@@ -238,6 +240,33 @@ class BotTest(unittest.TestCase):
         self.tg.say(USER, "text in General sent with thread id 1", thread=1)
         self.wait(lambda: "text in General sent with thread id 1" in self.tg.topics(), "new topic from General")
         self.assertFalse([1 for st in self.bot.state.topics("g").values() if st["thread"] == 1])
+
+    def prompts(self):
+        with open(self.args_log + ".prompts") as f:
+            return f.read().splitlines()
+
+    def test_claude_slash_commands_are_forwarded(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.say(USER, "/usage", thread=thread)
+        self.wait(lambda: os.path.exists(self.args_log + ".prompts"), "claude run for /usage")
+        self.assertEqual(self.prompts()[-1], "/usage")
+        self.tg.say(USER, "//help", thread=thread)                     # the bot has its own /help: escape with //
+        self.wait(lambda: len(self.prompts()) >= 2, "escaped command")
+        self.assertEqual(self.prompts()[-1], "/help")
+        self.tg.say(USER, "/mode", thread=thread)                      # a bot command is never forwarded
+        self.wait(lambda: any("Режим:" in t for t in self.tg.sent(thread)), "bot answers /mode")
+        time.sleep(1)
+        self.assertEqual(len(self.prompts()), 2)
+
+    def test_claude_command_in_general_gets_a_hint(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        self.tg.say(USER, "/usage")
+        self.wait(lambda: any("выполняются в теме" in t for t in self.tg.sent(None)), "hint")
+        time.sleep(1)
+        self.assertFalse(os.path.exists(self.args_log + ".prompts"), "no claude run from General")
 
     def test_mode_safe_changes_flags(self):
         self.start()

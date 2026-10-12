@@ -24,6 +24,7 @@ import uuid
 
 log = logging.getLogger("claude-tg")
 DEFAULT_CLAUDE_DIR = os.path.expanduser("~/.claude")
+OWN_COMMANDS = {"/help", "/sessions", "/open", "/resync", "/mode", "/stop", "/whoami"}   # everything else goes to Claude
 MAX_CHUNK = 3800            # Telegram limit is 4096 characters
 MAX_CHUNKS = 12
 
@@ -397,7 +398,7 @@ class Bot:
             cmd += ["--dangerously-skip-permissions"]
         return cmd
 
-    def run_claude(self, group, sid, st, prompt, new=False):
+    def run_claude(self, group, sid, st, prompt, new=False, slash=False):
         with self.sid_locks[sid]:
             self.bot_prompts[sid].append(norm(prompt))
             env = os.environ.copy()
@@ -443,6 +444,9 @@ class Bot:
             if err:
                 self.send_topic(group, sid, st, "⚠️ " + short(err, 1500))
                 return
+            if slash:                                # slash command output is not written to the session file
+                self.send_topic(group, sid, st, result.strip() or "✅ Команда выполнена (без вывода).")
+                return
             for _ in range(10):                      # give the mirror a moment to post the answer
                 if st.get("events", 0) > before:
                     return
@@ -475,9 +479,16 @@ class Bot:
         if thread == 1:                               # id of the General topic
             thread = None
         args = text.split()[1:]
+        slash = False
+        if text.startswith("//"):                     # "//help" sends "/help" to Claude even if the bot has its own
+            text, cmd, slash = text[1:], "", True
+        elif cmd and cmd not in OWN_COMMANDS:         # a Claude command such as /usage, /context, /compact
+            cmd, slash = "", True
         if cmd == "/help":
             self.reply(msg, "В теме: текст продолжает сессию.\n/mode full|safe — права Claude\n/stop — прервать запуск\n"
-                            "В General: текст начинает новую сессию.\n/sessions — недавние сессии\n/open <id> — создать тему для сессии\n/resync — восстановить удалённые темы")
+                            "В General: текст начинает новую сессию.\n/sessions — недавние сессии\n/open <id> — создать тему для сессии\n/resync — восстановить удалённые темы\n"
+                            "Остальные команды с / (/usage, /context, /cost, /model, /compact ...) уходят в Claude. "
+                            "//команда отправляет её в Claude, даже если такая есть у бота.")
         elif cmd == "/sessions":
             self.cmd_sessions(group, msg)
         elif cmd == "/open":
@@ -501,11 +512,11 @@ class Bot:
                 p.kill()
             self.reply(msg, "Останавливаю." if p else "Сейчас ничего не запущено.")
         elif cmd:
-            self.reply(msg, "Неизвестная команда, см. /help")
+            self.reply(msg, "Эта команда работает внутри темы сессии. См. /help")
         elif thread:
             sid = self.find_sid(group, thread)
             if sid:
-                self.run_claude(group, sid, self.state.topics(group.name)[sid], text)
+                self.run_claude(group, sid, self.state.topics(group.name)[sid], text, slash=slash)
             else:                                     # a topic created by hand: bind a new session to it
                 sid = str(uuid.uuid4())
                 made = ((msg.get("reply_to_message") or {}).get("forum_topic_created") or {}).get("name") or ""
@@ -514,7 +525,9 @@ class Bot:
                     self.state.topics(group.name)[sid] = st
                 self.state.save()
                 log.info("new session bound to a manual topic group=%s session=%s", group.name, sid[:8])
-                self.run_claude(group, sid, st, text, new=True)
+                self.run_claude(group, sid, st, text, new=True, slash=slash)
+        elif slash:
+            self.reply(msg, "Команды Claude (%s) выполняются в теме сессии: откройте тему и отправьте её там." % text.split()[0])
         else:                                         # General: a new session
             sid = str(uuid.uuid4())
             st = self.create_topic(group, sid, short(text, 60), 0)

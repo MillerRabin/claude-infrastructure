@@ -57,6 +57,8 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
 | a topic you created yourself | any text | starts a **new** session bound to that topic (then it is an ordinary topic) |
 | topic | `/mode full\|safe` | full access / read-only (per topic) |
 | topic | `/stop` | kill the running `claude` for this session |
+| topic | `/usage`, `/context`, `/cost`, `/model`, `/compact`, any other `/command` | forwarded to Claude (`claude -p --resume`) and the output is posted at once. `/status` is not available in headless mode |
+| topic | `//help` | sends `/help` to Claude even when the bot has a command with that name (the bot's own: `/help /mode /stop /sessions /open /resync /whoami`) |
 | General | any text | start a new session and create its topic |
 | General | `/sessions` | list recent sessions (● has a topic, ○ has not) |
 | General | `/open <id>` | create a topic for an older session (first characters of the id are enough) |
