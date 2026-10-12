@@ -24,7 +24,8 @@ import uuid
 
 log = logging.getLogger("claude-tg")
 DEFAULT_CLAUDE_DIR = os.path.expanduser("~/.claude")
-OWN_COMMANDS = {"/help", "/sessions", "/open", "/resync", "/mode", "/stop", "/whoami"}   # everything else goes to Claude
+OWN_COMMANDS = {"/help", "/sessions", "/open", "/resync", "/mode", "/model", "/stop", "/whoami"}
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$")     # alias (sonnet, opus, opusplan, ...) or a full model id   # everything else goes to Claude
 MAX_CHUNK = 3800            # Telegram limit is 4096 characters
 MAX_CHUNKS = 12
 
@@ -164,6 +165,18 @@ class State:
     def topics(self, group):
         return self.data["topics"].setdefault(group, {})
 
+    def default_model(self, group):
+        return (self.data.get("models") or {}).get(group)
+
+    def set_default_model(self, group, model):
+        with self.lock:
+            models = self.data.setdefault("models", {})
+            if model:
+                models[group] = model
+            else:
+                models.pop(group, None)
+        self.save()
+
 
 # --------------------------------------------------------------------------- transcripts
 
@@ -240,7 +253,8 @@ class Bot:
     def create_topic(self, group, sid, title, pos):
         name = short(title or sid[:8], 100)
         res = self.tg.call("createForumTopic", chat_id=group.chat_id, name=name)
-        st = {"thread": res["message_thread_id"], "pos": pos, "title": name, "mode": self.cfg.default_mode, "events": 0}
+        st = {"thread": res["message_thread_id"], "pos": pos, "title": name, "mode": self.cfg.default_mode, "events": 0,
+              "model": self.state.default_model(group.name)}
         with self.state.lock:
             self.state.topics(group.name)[sid] = st
         self.state.save()
@@ -389,9 +403,11 @@ class Bot:
             self.stop.wait(2)
 
     # ---- running claude ---------------------------------------------------------
-    def claude_cmd(self, sid, mode, new):
+    def claude_cmd(self, sid, mode, new, model=None):
         cmd = [self.cfg.claude_bin, "-p", "--output-format", "json"]
         cmd += ["--session-id", sid] if new else ["--resume", sid]
+        if model:
+            cmd += ["--model", model]
         if mode == "safe":
             cmd += ["--permission-mode", "default", "--allowedTools", "Read", "Glob", "Grep"]
         else:
@@ -417,7 +433,7 @@ class Bot:
             threading.Thread(target=keep_typing, daemon=True).start()
             err, result = None, ""
             try:
-                p = subprocess.Popen(self.claude_cmd(sid, st.get("mode", "full"), new), cwd=group.project_dir, env=env,
+                p = subprocess.Popen(self.claude_cmd(sid, st.get("mode", "full"), new, st.get("model")), cwd=group.project_dir, env=env,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 self.procs[sid] = p
                 try:
@@ -486,6 +502,7 @@ class Bot:
             cmd, slash = "", True
         if cmd == "/help":
             self.reply(msg, "В теме: текст продолжает сессию.\n/mode full|safe — права Claude\n/stop — прервать запуск\n"
+                            "/model [имя|default] — модель темы (sonnet, opus, opusplan, fable, haiku). В General: модель новых сессий\n"
                             "В General: текст начинает новую сессию.\n/sessions — недавние сессии\n/open <id> — создать тему для сессии\n/resync — восстановить удалённые темы\n"
                             "Остальные команды с / (/usage, /context, /cost, /model, /compact ...) уходят в Claude. "
                             "//команда отправляет её в Claude, даже если такая есть у бота.")
@@ -493,6 +510,8 @@ class Bot:
             self.cmd_sessions(group, msg)
         elif cmd == "/open":
             self.cmd_open(group, msg, args)
+        elif cmd == "/model":
+            self.cmd_model(group, msg, thread, args)
         elif cmd == "/resync":
             checked, recreated, unknown = self.resync_group(group)
             self.reply(msg, "Проверено тем: %d, восстановлено: %d, не удалось проверить: %d." % (checked, recreated, unknown))
@@ -520,7 +539,8 @@ class Bot:
             else:                                     # a topic created by hand: bind a new session to it
                 sid = str(uuid.uuid4())
                 made = ((msg.get("reply_to_message") or {}).get("forum_topic_created") or {}).get("name") or ""
-                st = {"thread": thread, "pos": 0, "title": short(made, 100), "mode": self.cfg.default_mode, "events": 0}
+                st = {"thread": thread, "pos": 0, "title": short(made, 100), "mode": self.cfg.default_mode, "events": 0,
+                      "model": self.state.default_model(group.name)}
                 with self.state.lock:
                     self.state.topics(group.name)[sid] = st
                 self.state.save()
@@ -532,6 +552,29 @@ class Bot:
             sid = str(uuid.uuid4())
             st = self.create_topic(group, sid, short(text, 60), 0)
             self.run_claude(group, sid, st, text, new=True)
+
+    def cmd_model(self, group, msg, thread, args):
+        """/model [name|default]: model of this topic; in General: default model of new sessions of the group."""
+        name = args[0] if args else None
+        if name and name not in ("default", "reset") and not MODEL_RE.match(name):
+            return self.reply(msg, "Недопустимое имя модели. Примеры: sonnet, opus, opusplan, fable, haiku или полный id модели.")
+        clear = name in ("default", "reset")
+        if thread:
+            sid = self.find_sid(group, thread)
+            st = self.state.topics(group.name).get(sid) if sid else None
+            if not st:
+                return
+            if name:
+                st["model"] = None if clear else name
+                self.state.save()
+            self.reply(msg, "Модель темы: %s." % (st.get("model") or "по умолчанию аккаунта") +
+                       ("" if name else "\n/model <sonnet|opus|opusplan|fable|haiku|default> — сменить."))
+        else:
+            if name:
+                self.state.set_default_model(group.name, None if clear else name)
+            self.reply(msg, "Модель новых сессий группы: %s. Уже существующие темы не меняются." %
+                       (self.state.default_model(group.name) or "по умолчанию аккаунта") +
+                       ("" if name else "\n/model <имя> — сменить для новых сессий."))
 
     def cmd_sessions(self, group, msg):
         rows = []

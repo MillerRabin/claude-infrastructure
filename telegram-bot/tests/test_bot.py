@@ -164,6 +164,10 @@ class BotTest(unittest.TestCase):
             time.sleep(0.1)
         self.fail("timeout waiting for: " + what + "\ncalls: " + json.dumps(self.tg.calls, ensure_ascii=False)[:1500])
 
+    def args_lines(self):
+        with open(self.args_log) as f:
+            return f.read().splitlines()
+
     def last_args(self):
         with open(self.args_log) as f:
             return json.loads(f.read().splitlines()[-1])
@@ -259,6 +263,35 @@ class BotTest(unittest.TestCase):
         self.wait(lambda: any("Режим:" in t for t in self.tg.sent(thread)), "bot answers /mode")
         time.sleep(1)
         self.assertEqual(len(self.prompts()), 2)
+
+    def test_model_per_topic_and_group_default(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.say(USER, "/model", thread=thread)
+        self.wait(lambda: any("по умолчанию аккаунта" in t for t in self.tg.sent(thread)), "shows the default")
+        self.tg.say(USER, "/model opus", thread=thread)
+        self.wait(lambda: any("Модель темы: opus" in t for t in self.tg.sent(thread)), "model set")
+        self.tg.say(USER, "work on it", thread=thread)
+        self.wait(lambda: os.path.exists(self.args_log), "claude run")
+        args = self.last_args()
+        self.assertEqual(args[args.index("--model") + 1], "opus")
+        self.tg.say(USER, "/model --evil", thread=thread)                 # not a model name: never reaches the argv
+        self.wait(lambda: any("Недопустимое" in t for t in self.tg.sent(thread)), "rejected")
+        self.tg.say(USER, "/model default", thread=thread)
+        self.wait(lambda: sum("по умолчанию аккаунта" in t for t in self.tg.sent(thread)) >= 2, "cleared")
+        self.tg.say(USER, "again", thread=thread)
+        self.wait(lambda: len(self.args_lines()) >= 2, "second run")
+        self.assertNotIn("--model", self.last_args())
+        # General: default model for new sessions
+        self.tg.say(USER, "/model fable")
+        self.wait(lambda: any("Модель новых сессий группы: fable" in t for t in self.tg.sent(None)), "group default set")
+        self.tg.say(USER, "brand new session")
+        self.wait(lambda: any("--session-id" in line for line in self.args_lines()), "new session run")
+        args = self.last_args()
+        self.assertEqual(args[args.index("--model") + 1], "fable")
+        new = [st for st in self.bot.state.topics("g").values() if st["title"] == "brand new session"][0]
+        self.assertEqual(new["model"], "fable")
 
     def test_claude_command_in_general_gets_a_hint(self):
         self.start()

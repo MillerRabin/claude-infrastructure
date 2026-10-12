@@ -57,6 +57,8 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
 | a topic you created yourself | any text | starts a **new** session bound to that topic (then it is an ordinary topic) |
 | topic | `/mode full\|safe` | full access / read-only (per topic) |
 | topic | `/stop` | kill the running `claude` for this session |
+| topic | `/model [name\|default]` | model of this topic (`sonnet`, `opus`, `opusplan`, `fable`, `haiku` or a full model id); without an argument shows the current one; `default` returns to the account's default. Passed as `--model` on every run. Claude's own `/model` is `//model` |
+| General | `/model [name\|default]` | model of **new** sessions of the group (existing topics keep theirs) |
 | topic | `/usage`, `/context`, `/cost`, `/model`, `/compact`, any other `/command` | forwarded to Claude (`claude -p --resume`) and the output is posted at once. `/status` is not available in headless mode |
 | topic | `//help` | sends `/help` to Claude even when the bot has a command with that name (the bot's own: `/help /mode /stop /sessions /open /resync /whoami`) |
 | General | any text | start a new session and create its topic |
