@@ -310,13 +310,15 @@ class BotTest(unittest.TestCase):
         self.wait(lambda: self.tg.topics(), "topic created")
         thread = self.thread_of("Old topic")
         self.tool_activity("echo '<b>&</b>' > /tmp/x")
-        self.wait(lambda: any("Инструменты" in m["text"] for m in self.tg.messages(thread)), "tool block")
-        msg = [m for m in self.tg.messages(thread) if "Инструменты" in m["text"]][0]
+        self.wait(lambda: any("<blockquote expandable>" in m["text"] for m in self.tg.messages(thread)), "tool block")
+        msg = [m for m in self.tg.messages(thread) if "<blockquote expandable>" in m["text"]][0]
         self.assertEqual(msg["parse_mode"], "HTML")
         self.assertIn("<blockquote expandable>", msg["text"])
         self.assertIn("&lt;b&gt;&amp;&lt;/b&gt;", msg["text"])            # command text is escaped
         self.assertNotIn("<b>", msg["text"])
-        self.assertIn("Инструменты (2)", msg["text"])                    # both calls in one block
+        self.assertNotIn("Инструменты", msg["text"])                     # no header line, only the calls
+        self.assertTrue(msg["text"].startswith("<blockquote expandable>🔧 Bash"))
+        self.assertIn("🔧 Read: /etc/hosts", msg["text"])                # both calls in one block
 
     def test_tools_command_changes_display(self):
         self.start()

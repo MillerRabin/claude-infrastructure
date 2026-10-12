@@ -278,7 +278,7 @@ def tool_blocks(lines, mode):
             return
         body = "\n".join(esc(x) for x in cur)
         if mode == "quote":
-            out.append("<blockquote expandable>🔧 Инструменты (%d)\n%s</blockquote>" % (len(cur), body))
+            out.append("<blockquote expandable>%s</blockquote>" % body)
         elif mode == "spoiler":
             out.append("<tg-spoiler>%s</tg-spoiler>" % body)
         else:
