@@ -22,7 +22,7 @@ USER, OTHER, CHAT = 111, 222, -1001
 class FakeTelegram:
     def __init__(self):
         self.calls, self.updates, self.next_thread, self.next_update = [], queue.Queue(), 100, 1
-        self.deleted = set()
+        self.deleted, self.reject_html = set(), False
         fake = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -32,7 +32,10 @@ class FakeTelegram:
             def do_POST(self):
                 method = self.path.rsplit("/", 1)[-1]
                 params = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
-                if params.get("message_thread_id") in fake.deleted and method != "createForumTopic":
+                if fake.reject_html and params.get("parse_mode") == "HTML":
+                    body = json.dumps({"ok": False, "error_code": 400,
+                                       "description": "Bad Request: can't parse entities: unsupported start tag"}).encode()
+                elif params.get("message_thread_id") in fake.deleted and method != "createForumTopic":
                     body = json.dumps({"ok": False, "error_code": 400,
                                        "description": "Bad Request: message thread not found"}).encode()
                 else:
@@ -72,6 +75,9 @@ class FakeTelegram:
             msg["message_thread_id"] = thread
         self.updates.put({"update_id": self.next_update, "message": msg})
         self.next_update += 1
+
+    def messages(self, thread=None):
+        return [p for m, p in self.calls if m == "sendMessage" and p.get("message_thread_id") == thread]
 
     def sent(self, thread=None):
         return [p["text"] for m, p in self.calls if m == "sendMessage" and p.get("message_thread_id") == thread]
@@ -293,6 +299,54 @@ class BotTest(unittest.TestCase):
         new = [st for st in self.bot.state.topics("g").values() if st["title"] == "brand new session"][0]
         self.assertEqual(new["model"], "fable")
 
+    def tool_activity(self, command="ls -la"):
+        with open(self.old, "a") as f:
+            f.write(jl(type="assistant", message={"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": command}},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "/etc/hosts"}}]}))
+
+    def test_tool_calls_are_collapsible_and_escaped(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tool_activity("echo '<b>&</b>' > /tmp/x")
+        self.wait(lambda: any("Инструменты" in m["text"] for m in self.tg.messages(thread)), "tool block")
+        msg = [m for m in self.tg.messages(thread) if "Инструменты" in m["text"]][0]
+        self.assertEqual(msg["parse_mode"], "HTML")
+        self.assertIn("<blockquote expandable>", msg["text"])
+        self.assertIn("&lt;b&gt;&amp;&lt;/b&gt;", msg["text"])            # command text is escaped
+        self.assertNotIn("<b>", msg["text"])
+        self.assertIn("Инструменты (2)", msg["text"])                    # both calls in one block
+
+    def test_tools_command_changes_display(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.say(USER, "/tools spoiler", thread=thread)
+        self.wait(lambda: any("в этой теме: spoiler" in t for t in self.tg.sent(thread)), "spoiler set")
+        self.tool_activity()
+        self.wait(lambda: any("<tg-spoiler>" in m["text"] for m in self.tg.messages(thread)), "spoiler block")
+        self.tg.say(USER, "/tools off", thread=thread)
+        self.wait(lambda: any("в этой теме: off" in t for t in self.tg.sent(thread)), "off set")
+        before = len(self.tg.messages(thread))
+        self.tool_activity("echo hidden-from-telegram")
+        with open(self.old, "a") as f:
+            f.write(jl(type="assistant", message={"role": "assistant", "content": [{"type": "text", "text": "after off"}]}))
+        self.wait(lambda: any("after off" in m["text"] for m in self.tg.messages(thread)), "text still mirrored")
+        self.assertFalse(any("hidden-from-telegram" in m["text"] for m in self.tg.messages(thread)[before:]))
+        self.tg.say(USER, "/tools nonsense", thread=thread)
+        self.wait(lambda: any("Режимы:" in t for t in self.tg.sent(thread)), "bad mode rejected")
+
+    def test_html_rejected_falls_back_to_plain_text(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.reject_html = True
+        self.tool_activity()
+        self.wait(lambda: any("🔧 Bash: ls -la" in m["text"] and "parse_mode" not in m for m in self.tg.messages(thread)),
+                  "plain fallback")
+        self.assertFalse(any("<blockquote" in m["text"] for m in self.tg.messages(thread)[-3:]))
+
     def test_claude_command_in_general_gets_a_hint(self):
         self.start()
         self.wait(lambda: self.tg.topics(), "topic created")
@@ -359,6 +413,15 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(bot.parse_line(j(type="assistant", message={"content": [{"type": "thinking", "thinking": "..."}]})), [])
         self.assertEqual(bot.parse_line(j(type="ai-title", aiTitle="T")), [("title", "T")])
         self.assertEqual(bot.parse_line("not json"), [])
+
+    def test_render_limits_and_modes(self):
+        segs = [("tool", "🔧 Bash: " + "x" * 300) for _ in range(40)] + [("text", "🤖 " + "a" * 9000)]
+        for mode in ("quote", "spoiler", "plain"):
+            messages = bot.render(segs, mode)
+            self.assertTrue(all(len(m) <= bot.RENDER_LIMIT + 100 for m in messages), mode)
+            self.assertLessEqual(len(messages), bot.MAX_CHUNKS)
+        self.assertEqual(bot.render([("tool", "🔧 x")], "off"), [])
+        self.assertEqual(bot.strip_tags("<blockquote expandable>a &lt;b&gt;</blockquote>"), "a <b>")
 
     def test_chunks(self):
         self.assertEqual(bot.chunks("short"), ["short"])

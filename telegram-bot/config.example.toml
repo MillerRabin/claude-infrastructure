@@ -3,6 +3,7 @@ token_file = "~/.config/claude-tg/token"      # the BotFather token, created by 
 allowed_user_ids = []                          # your Telegram user id(s). EMPTY = setup mode: only /whoami works
 recent_days = 7                                # sessions active in the last N days get a topic automatically
 mirror_tools = true                            # also show "🔧 Bash: ..." lines for tool calls
+tool_display = "quote"                         # quote (collapsible) | spoiler (hidden until tapped) | plain | off; per topic: /tools
 default_mode = "full"                          # full = --dangerously-skip-permissions, safe = read-only tools
 run_timeout_seconds = 3600
 claude_bin = "~/.local/bin/claude"

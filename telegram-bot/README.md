@@ -7,7 +7,7 @@ you continue them from the phone.
 - Every Claude **session** is a **topic** of its group. Recent sessions (default: active in the last 7 days) get a topic
   automatically; older ones with `/open <id>`.
 - **Mirroring:** every new message of every session is posted into its topic: your prompts (`👤`), Claude's answers (`🤖`)
-  and tool calls (`🔧`). This includes what you type in the tmux session on the machine itself. History is not replayed.
+  and tool calls (`🔧`, grouped into one collapsible block). This includes what you type in the tmux session on the machine itself. History is not replayed.
 - **Writing:** a message in a topic continues that session with `claude -p --resume <id>`. A message in the group's
   General topic starts a **new** session (and creates its topic); a message in a topic you created by hand starts a new
   session bound to that topic.
@@ -57,6 +57,7 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
 | a topic you created yourself | any text | starts a **new** session bound to that topic (then it is an ordinary topic) |
 | topic | `/mode full\|safe` | full access / read-only (per topic) |
 | topic | `/stop` | kill the running `claude` for this session |
+| topic | `/tools quote\|spoiler\|plain\|off` | how tool calls (`🔧`) are shown in this topic: `quote` = collapsible block (default), `spoiler` = hidden until tapped, `plain` = ordinary lines, `off` = not shown |
 | topic | `/model [name\|default]` | model of this topic (`sonnet`, `opus`, `opusplan`, `fable`, `haiku` or a full model id); without an argument shows the current one; `default` returns to the account's default. Passed as `--model` on every run. Claude's own `/model` is `//model` |
 | General | `/model [name\|default]` | model of **new** sessions of the group (existing topics keep theirs) |
 | topic | `/usage`, `/context`, `/cost`, `/model`, `/compact`, any other `/command` | forwarded to Claude (`claude -p --resume`) and the output is posted at once. `/status` is not available in headless mode |

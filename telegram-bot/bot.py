@@ -9,6 +9,7 @@ Only the Telegram user ids listed in the config can do anything; everybody else 
 """
 import collections
 import glob
+import html as htmllib
 import json
 import logging
 import os
@@ -24,7 +25,9 @@ import uuid
 
 log = logging.getLogger("claude-tg")
 DEFAULT_CLAUDE_DIR = os.path.expanduser("~/.claude")
-OWN_COMMANDS = {"/help", "/sessions", "/open", "/resync", "/mode", "/model", "/stop", "/whoami"}
+OWN_COMMANDS = {"/help", "/sessions", "/open", "/resync", "/mode", "/model", "/tools", "/stop", "/whoami"}
+TOOL_MODES = ("quote", "spoiler", "plain", "off")
+RENDER_LIMIT = 3600                      # characters of HTML per message (Telegram allows 4096 of visible text)
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$")     # alias (sonnet, opus, opusplan, ...) or a full model id   # everything else goes to Claude
 MAX_CHUNK = 3800            # Telegram limit is 4096 characters
 MAX_CHUNKS = 12
@@ -81,6 +84,9 @@ class Config:
         self.api_base = raw.get("api_base", "https://api.telegram.org")
         self.run_timeout = int(raw.get("run_timeout_seconds", 3600))
         self.default_mode = raw.get("default_mode", "full")      # full | safe
+        self.tool_display = raw.get("tool_display", "quote")     # quote | spoiler | plain | off
+        if self.tool_display not in TOOL_MODES:
+            raise ValueError("tool_display must be one of %s" % ", ".join(TOOL_MODES))
         self.groups = [Group(g) for g in raw.get("groups", [])]
 
 
@@ -130,6 +136,18 @@ class TG:
                 time.sleep(retry + 1)
                 continue
             raise TGError(body.get("description", "error"), body.get("error_code", 0))
+
+    def send_html(self, chat_id, html, thread=None):
+        self._throttle(chat_id)
+        params = {"chat_id": chat_id, "text": html, "parse_mode": "HTML", "disable_web_page_preview": True}
+        if thread:
+            params["message_thread_id"] = thread
+        try:
+            self.call("sendMessage", **params)
+        except TGError as e:
+            if "parse entities" not in e.description.lower():
+                raise
+            self.send(chat_id, strip_tags(html), thread)         # formatting rejected: plain text
 
     def send(self, chat_id, text, thread=None):
         for part in chunks(text) or [""]:
@@ -231,6 +249,87 @@ def norm(text):
     return " ".join(text.split())
 
 
+# --------------------------------------------------------------------------- rendering
+
+def esc(text):
+    return htmllib.escape(text, quote=False)
+
+
+def split_raw(text, limit):
+    """Cut a raw text into pieces whose escaped form fits into `limit` characters."""
+    pieces, text = [], text.strip()
+    while text:
+        n = min(len(text), limit)
+        while n > 1 and len(esc(text[:n])) > limit:
+            n = int(n * 0.8)
+        cut = text.rfind("\n", 0, n) if n < len(text) else n
+        cut = cut if cut > n // 2 else n
+        pieces.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return pieces
+
+
+def tool_blocks(lines, mode):
+    """Consecutive tool calls -> collapsible Telegram blocks (HTML)."""
+    out, cur = [], []
+
+    def flush():
+        if not cur:
+            return
+        body = "\n".join(esc(x) for x in cur)
+        if mode == "quote":
+            out.append("<blockquote expandable>🔧 Инструменты (%d)\n%s</blockquote>" % (len(cur), body))
+        elif mode == "spoiler":
+            out.append("<tg-spoiler>%s</tg-spoiler>" % body)
+        else:
+            out.append(body)
+        cur.clear()
+    size = 0
+    for line in lines:
+        line = line if len(esc(line)) < 1000 else line[:900] + "…"
+        if cur and size + len(esc(line)) > RENDER_LIMIT - 200:
+            flush()
+            size = 0
+        cur.append(line)
+        size += len(esc(line)) + 1
+    flush()
+    return out
+
+
+def render(segments, tool_mode):
+    """segments: [("text", str) | ("tool", str)] -> list of HTML messages."""
+    out, cur = [], ""
+
+    def add(chunk):
+        nonlocal cur
+        if cur and len(cur) + len(chunk) + 2 > RENDER_LIMIT:
+            out.append(cur)
+            cur = ""
+        cur += ("\n\n" if cur else "") + chunk
+    i = 0
+    while i < len(segments):
+        kind, text = segments[i]
+        if kind == "tool":
+            group = []
+            while i < len(segments) and segments[i][0] == "tool":
+                group.append(segments[i][1])
+                i += 1
+            if tool_mode != "off":
+                for block in tool_blocks(group, tool_mode):
+                    add(block)
+            continue
+        for piece in split_raw(text, RENDER_LIMIT - 100):
+            add(esc(piece))
+        i += 1
+    if cur:
+        out.append(cur)
+    return out[:MAX_CHUNKS]
+
+
+def strip_tags(h):
+    return htmllib.unescape(re.sub(r"</?(?:blockquote|tg-spoiler)[^>]*>", "", h))
+
+
 # --------------------------------------------------------------------------- bot
 
 class Bot:
@@ -299,13 +398,14 @@ class Bot:
                 recreated += 1
         return len(topics), recreated, unknown
 
-    def send_topic(self, group, sid, st, text):
+    def send_topic(self, group, sid, st, text, html=False):
+        send = self.tg.send_html if html else self.tg.send
         try:
-            self.tg.send(group.chat_id, text, st["thread"])
+            send(group.chat_id, text, st["thread"])
         except TGError as e:
             if "thread not found" in e.description.lower() or "topic" in e.description.lower() and "deleted" in e.description.lower():
                 self.recreate_topic(group, sid, st)
-                self.tg.send(group.chat_id, text, st["thread"])
+                send(group.chat_id, text, st["thread"])
             else:
                 raise
 
@@ -326,7 +426,7 @@ class Bot:
         if end == 0:
             return
         lines, st["pos"] = raw[:end].decode("utf-8", "replace").splitlines(), st["pos"] + end
-        parts = []
+        parts = []                                    # [("text"|"tool", str)] in transcript order
         for line in lines:
             for kind, text in parse_line(line, self.cfg.mirror_tools):
                 if kind == "title":
@@ -342,14 +442,15 @@ class Bot:
                     if norm(text) in q:                       # typed in Telegram, already visible there
                         q.remove(norm(text))
                     else:
-                        parts.append("👤 " + text)
+                        parts.append(("text", "👤 " + text))
                 elif kind == "assistant":
-                    parts.append("🤖 " + text)
+                    parts.append(("text", "🤖 " + text))
                 else:
-                    parts.append(text)
+                    parts.append(("tool", text))
         if parts:
             st["events"] = st.get("events", 0) + len(parts)
-            self.send_topic(group, sid, st, "\n\n".join(parts))
+            for message in render(parts, st.get("tools") or self.cfg.tool_display):
+                self.send_topic(group, sid, st, message, html=True)
         self.state.save()
 
     def mirror_once(self):
@@ -502,6 +603,7 @@ class Bot:
             cmd, slash = "", True
         if cmd == "/help":
             self.reply(msg, "В теме: текст продолжает сессию.\n/mode full|safe — права Claude\n/stop — прервать запуск\n"
+                            "/tools quote|spoiler|plain|off — как показывать вызовы инструментов (🔧)\n"
                             "/model [имя|default] — модель темы (sonnet, opus, opusplan, fable, haiku). В General: модель новых сессий\n"
                             "В General: текст начинает новую сессию.\n/sessions — недавние сессии\n/open <id> — создать тему для сессии\n/resync — восстановить удалённые темы\n"
                             "Остальные команды с / (/usage, /context, /cost, /model, /compact ...) уходят в Claude. "
@@ -512,6 +614,8 @@ class Bot:
             self.cmd_open(group, msg, args)
         elif cmd == "/model":
             self.cmd_model(group, msg, thread, args)
+        elif cmd == "/tools":
+            self.cmd_tools(group, msg, thread, args)
         elif cmd == "/resync":
             checked, recreated, unknown = self.resync_group(group)
             self.reply(msg, "Проверено тем: %d, восстановлено: %d, не удалось проверить: %d." % (checked, recreated, unknown))
@@ -552,6 +656,20 @@ class Bot:
             sid = str(uuid.uuid4())
             st = self.create_topic(group, sid, short(text, 60), 0)
             self.run_claude(group, sid, st, text, new=True)
+
+    def cmd_tools(self, group, msg, thread, args):
+        """/tools [quote|spoiler|plain|off]: how tool calls are shown in this topic."""
+        sid = self.find_sid(group, thread) if thread else None
+        st = self.state.topics(group.name).get(sid) if sid else None
+        if not st:
+            return self.reply(msg, "Команда работает внутри темы сессии.")
+        if args and args[0] in TOOL_MODES:
+            st["tools"] = args[0]
+            self.state.save()
+        elif args:
+            return self.reply(msg, "Режимы: quote (сворачиваемая цитата), spoiler (скрыто, раскрывается касанием), plain, off.")
+        self.reply(msg, "Вызовы инструментов в этой теме: %s." % (st.get("tools") or self.cfg.tool_display) +
+                   ("" if args else "\n/tools quote|spoiler|plain|off"))
 
     def cmd_model(self, group, msg, thread, args):
         """/model [name|default]: model of this topic; in General: default model of new sessions of the group."""
