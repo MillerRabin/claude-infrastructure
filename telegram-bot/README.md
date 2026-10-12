@@ -72,6 +72,11 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
 
 - Sessions are the `*.jsonl` files in `<config_dir>/projects/<project>/` (the same files `claude --resume` shows).
   The bot tails them and posts new lines; it also renames a topic when Claude generates a session title.
+- **Formatting:** Claude writes Markdown, Telegram does not render it, so the bot converts it to Telegram's HTML subset:
+  `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, fenced code blocks (with language), `# headings` (bold), lists (`•`),
+  `> quotes`, links (only `http(s)`, `tg`, `mailto`) and tables (monospace, Telegram has no tables). All text is escaped.
+  Telegram does not allow code inside bold/italic, so `**`x`**` becomes plain monospace `x`. If Telegram rejects a message's
+  formatting, it is sent again as plain text.
 - Prompts typed in Telegram are not echoed back (they are already visible); only Claude's output is mirrored.
 - Telegram limits: about 20 messages per minute per group (the bot throttles itself), 4096 characters per message
   (long answers are split into several messages, at most 12).

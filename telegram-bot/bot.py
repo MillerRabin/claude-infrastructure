@@ -269,6 +269,144 @@ def split_raw(text, limit):
     return pieces
 
 
+# --- Markdown (what Claude writes) -> the HTML subset Telegram understands ---------------------------
+CODE_MARK, TAG_MARK = "\x01", "\x00"
+SAFE_URL = re.compile(r"^(https?://|tg://|mailto:)", re.I)
+
+
+def _wrap(tag, inner):
+    """Wrap `inner` in <tag>, but never around code: Telegram does not allow code inside bold/italic."""
+    parts = re.split("(\x01\\d+\x01)", inner)
+    return "".join(p if (not p or p.startswith(CODE_MARK)) else "<%s>%s</%s>" % (tag, p, tag) for p in parts)
+
+
+def inline_md(text, bold=False):
+    stash = []
+
+    def keep(marker, html):
+        stash.append(html)
+        return "%s%d%s" % (marker, len(stash) - 1, marker)
+    text = re.sub(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", lambda m: keep(CODE_MARK, "<code>%s</code>" % esc(m.group(2).strip())), text)
+    text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|~>])", lambda m: keep(TAG_MARK, esc(m.group(1))), text)
+
+    def link(m):
+        url = m.group(2).strip()
+        if not SAFE_URL.match(url):
+            return m.group(0)
+        href = esc(url).replace('"', "%22")
+        return keep(TAG_MARK, '<a href="%s">' % href) + m.group(1) + keep(TAG_MARK, "</a>")
+    text = re.sub(r"\[([^\[\]\n]+)\]\(([^()\s]+)\)", link, text)
+    text = esc(text)
+    text = re.sub(r"\*\*\*(?!\s)(.+?)(?<!\s)\*\*\*", lambda m: _wrap("b", _wrap("i", m.group(1))), text)
+    text = re.sub(r"(?<![\w*])\*\*(?![\s*])(.+?)(?<![\s*])\*\*(?![\w*])", lambda m: _wrap("b", m.group(1)), text)
+    text = re.sub(r"(?<!\w)__(?![\s_])(.+?)(?<![\s_])__(?!\w)", lambda m: _wrap("b", m.group(1)), text)
+    text = re.sub(r"(?<![\w*])\*(?![\s*])(.+?)(?<![\s*])\*(?![\w*])", lambda m: _wrap("i", m.group(1)), text)
+    text = re.sub(r"(?<!\w)_(?![\s_])(.+?)(?<![\s_])_(?!\w)", lambda m: _wrap("i", m.group(1)), text)
+    text = re.sub(r"~~(?!\s)(.+?)(?<!\s)~~", lambda m: _wrap("s", m.group(1)), text)
+    if bold:
+        text = _wrap("b", text)
+    return re.sub("[\x00\x01](\\d+)[\x00\x01]", lambda m: stash[int(m.group(1))], text)
+
+
+def _md_line(line):
+    m = re.match(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$", line)
+    if m:
+        bullet = "•" if m.group(2) in "-*+" else m.group(2)
+        return "%s%s %s" % (m.group(1)[:8], bullet, inline_md(m.group(3)))
+    m = re.match(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$", line)
+    if m:
+        return inline_md(m.group(1), bold=True)
+    if re.match(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$", line):
+        return "──────────"
+    return inline_md(line)
+
+
+def _pre_blocks(lines, lang=""):
+    out, cur, size = [], [], 0
+    cls = ' class="language-%s"' % lang if lang and re.match(r"^[\w+#.-]{1,20}$", lang) else ""
+    head, tail = "<pre><code%s>" % cls, "</code></pre>"
+
+    def flush():
+        if cur:
+            out.append(head + "\n".join(esc(x) for x in cur) + tail)
+            cur.clear()
+    for line in lines:
+        line = line if len(esc(line)) < 1500 else line[:1400] + "…"
+        if cur and size + len(esc(line)) > RENDER_LIMIT - 200:
+            flush()
+            size = 0
+        cur.append(line)
+        size += len(esc(line)) + 1
+    flush()
+    return out or [head + tail]
+
+
+def _table_block(rows):
+    cells = []
+    for row in rows:
+        if re.match(r"^\s*\|?[\s:|-]+\|?\s*$", row) and "-" in row:
+            continue
+        cells.append([re.sub(r"[*`]|__", "", c).strip() for c in row.strip().strip("|").split("|")])
+    if not cells:
+        return []
+    cols = max(len(r) for r in cells)
+    widths = [min(40, max((len(r[i]) if i < len(r) else 0) for r in cells)) for i in range(cols)]
+    text = "\n".join("  ".join((r[i] if i < len(r) else "").ljust(widths[i]) for i in range(cols)).rstrip() for r in cells)
+    return _pre_blocks(text.split("\n"))
+
+
+def md_blocks(text):
+    """Markdown -> list of Telegram-HTML blocks, each shorter than RENDER_LIMIT."""
+    lines, blocks, para, i = text.split("\n"), [], [], 0
+
+    def flush():
+        if not para:
+            return
+        group, size = [], 0
+        for html in para:
+            if group and size + len(html) > RENDER_LIMIT - 300:
+                blocks.append("\n".join(group))
+                group, size = [], 0
+            group.append(html)
+            size += len(html) + 1
+        blocks.append("\n".join(group))
+        para.clear()
+    while i < len(lines):
+        line = lines[i]
+        fence = re.match(r"^\s*(`{3,}|~{3,})\s*([\w+#.-]*)\s*$", line)
+        if fence:
+            flush()
+            ch, body, i = fence.group(1)[0], [], i + 1
+            while i < len(lines) and not (lines[i].strip().startswith(ch * 3) and set(lines[i].strip()) <= {ch}):
+                body.append(lines[i])
+                i += 1
+            blocks += _pre_blocks(body, fence.group(2))
+            i += 1
+        elif line.strip().startswith("|") and i + 1 < len(lines) and lines[i + 1].strip().startswith("|"):
+            flush()
+            rows = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                rows.append(lines[i])
+                i += 1
+            blocks += _table_block(rows)
+        elif re.match(r"^\s{0,3}>", line):
+            flush()
+            quote = []
+            while i < len(lines) and re.match(r"^\s{0,3}>", lines[i]):
+                quote.append(inline_md(re.sub(r"^\s{0,3}>\s?", "", lines[i])))
+                i += 1
+            blocks.append("<blockquote>%s</blockquote>" % "\n".join(quote)[:RENDER_LIMIT - 100])
+        elif not line.strip():
+            flush()
+            i += 1
+        else:
+            for piece in (split_raw(line, RENDER_LIMIT - 400) if len(esc(line)) > RENDER_LIMIT - 400 else [line]):
+                para.append(_md_line(piece))
+            i += 1
+    flush()
+    return blocks
+
+
 def tool_blocks(lines, mode):
     """Consecutive tool calls -> collapsible Telegram blocks (HTML)."""
     out, cur = [], []
@@ -318,8 +456,22 @@ def render(segments, tool_mode):
                 for block in tool_blocks(group, tool_mode):
                     add(block)
             continue
-        for piece in split_raw(text, RENDER_LIMIT - 100):
-            add(esc(piece))
+        if kind == "md":                              # Claude's answer: Markdown -> Telegram HTML
+            try:
+                blocks = md_blocks(text)
+            except Exception:
+                log.exception("markdown conversion failed")
+                blocks = [esc(piece) for piece in split_raw(text, RENDER_LIMIT - 100)]
+            if blocks:
+                first = blocks[0]
+                blocks[0] = "🤖 " + ("\n" if first.startswith(("<pre", "<blockquote")) else "") + first
+            else:
+                blocks = ["🤖"]
+            for block in blocks:
+                add(block)
+        else:
+            for piece in split_raw(text, RENDER_LIMIT - 100):
+                add(esc(piece))
         i += 1
     if cur:
         out.append(cur)
@@ -327,7 +479,7 @@ def render(segments, tool_mode):
 
 
 def strip_tags(h):
-    return htmllib.unescape(re.sub(r"</?(?:blockquote|tg-spoiler)[^>]*>", "", h))
+    return htmllib.unescape(re.sub(r"</?(?:b|i|s|u|a|code|pre|blockquote|tg-spoiler)(?:\s[^>]*)?>", "", h))
 
 
 # --------------------------------------------------------------------------- bot
@@ -444,7 +596,7 @@ class Bot:
                     else:
                         parts.append(("text", "👤 " + text))
                 elif kind == "assistant":
-                    parts.append(("text", "🤖 " + text))
+                    parts.append(("md", text))
                 else:
                     parts.append(("tool", text))
         if parts:
@@ -562,14 +714,16 @@ class Bot:
                 self.send_topic(group, sid, st, "⚠️ " + short(err, 1500))
                 return
             if slash:                                # slash command output is not written to the session file
-                self.send_topic(group, sid, st, result.strip() or "✅ Команда выполнена (без вывода).")
+                for message in render([("md", result.strip() or "✅ Команда выполнена (без вывода).")], "off"):
+                    self.send_topic(group, sid, st, message, html=True)
                 return
             for _ in range(10):                      # give the mirror a moment to post the answer
                 if st.get("events", 0) > before:
                     return
                 time.sleep(1)
             if result:
-                self.send_topic(group, sid, st, "🤖 " + result)
+                for message in render([("md", result)], "off"):
+                    self.send_topic(group, sid, st, message, html=True)
 
     # ---- telegram updates -------------------------------------------------------
     def reply(self, msg, text):

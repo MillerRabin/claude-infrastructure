@@ -320,6 +320,20 @@ class BotTest(unittest.TestCase):
         self.assertTrue(msg["text"].startswith("<blockquote expandable>🔧 Bash"))
         self.assertIn("🔧 Read: /etc/hosts", msg["text"])                # both calls in one block
 
+    def test_assistant_markdown_is_formatted_in_the_topic(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        with open(self.old, "a") as f:
+            f.write(jl(type="assistant", message={"role": "assistant", "content": [
+                {"type": "text", "text": "Порт **`13316`** — *жив*.\n```sh\nss -lnt\n```"}]}))
+        self.wait(lambda: any("<code>13316</code>" in m["text"] for m in self.tg.messages(thread)), "formatted message")
+        msg = [m for m in self.tg.messages(thread) if "<code>13316</code>" in m["text"]][0]
+        self.assertEqual(msg["parse_mode"], "HTML")
+        self.assertIn("<i>жив</i>", msg["text"])
+        self.assertIn('<pre><code class="language-sh">ss -lnt</code></pre>', msg["text"])
+        self.assertNotIn("**", msg["text"])
+
     def test_tools_command_changes_display(self):
         self.start()
         self.wait(lambda: self.tg.topics(), "topic created")
@@ -415,6 +429,50 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(bot.parse_line(j(type="assistant", message={"content": [{"type": "thinking", "thinking": "..."}]})), [])
         self.assertEqual(bot.parse_line(j(type="ai-title", aiTitle="T")), [("title", "T")])
         self.assertEqual(bot.parse_line("not json"), [])
+
+    def md(self, text):
+        return "\n\n".join(bot.render([("md", text)], "off"))
+
+    def test_markdown_inline(self):
+        self.assertEqual(self.md("Туннель **`127.0.0.1:13316`**."), "🤖 Туннель <code>127.0.0.1:13316</code>.")
+        self.assertEqual(self.md("**bold** *it* ~~del~~ `c`"), "🤖 <b>bold</b> <i>it</i> <s>del</s> <code>c</code>")
+        self.assertEqual(self.md("***both***"), "🤖 <b><i>both</i></b>")
+        self.assertEqual(self.md("**a `x` b**"), "🤖 <b>a </b><code>x</code><b> b</b>")      # no code inside bold
+        for plain in ("snake_case_name", "2 * 3 * 4", "a_b_c and _x_y", "**unclosed"):
+            self.assertNotIn("<i>", self.md(plain))
+        self.assertIn("<i>x</i>", self.md("_x_"))
+
+    def test_markdown_blocks(self):
+        out = self.md("# Title\n- one **b**\n  - nested\n1. first\n\n> quote *q*\n\n---\ntext")
+        self.assertIn("<b>Title</b>", out)
+        self.assertIn("• one <b>b</b>", out)
+        self.assertIn("  • nested", out)
+        self.assertIn("1. first", out)
+        self.assertIn("<blockquote>quote <i>q</i></blockquote>", out)
+        self.assertIn("──────────", out)
+        code = self.md("```python\nprint('<a>')\n```\nafter")
+        self.assertIn('<pre><code class="language-python">print(\'&lt;a&gt;\')</code></pre>', code)
+        self.assertTrue(code.rstrip().endswith("after"))
+        table = self.md("| A | B |\n|---|---|\n| **x** | `y` |")
+        self.assertIn("<pre><code>A  B\nx  y</code></pre>", table)
+
+    def test_markdown_never_injects_html(self):
+        out = self.md("<script>x</script> & [bad](javascript:alert(1)) [ok](https://e.com/?a=1&b=\"2\") **<b>**")
+        self.assertNotIn("<script", out)
+        self.assertNotIn('href="javascript', out)
+        self.assertIn("&lt;script&gt;", out)
+        self.assertIn('<a href="https://e.com/?a=1&amp;b=%222%22">ok</a>', out)
+        self.assertEqual(out.count("<b>"), out.count("</b>"))
+        self.assertEqual(bot.strip_tags(self.md("**a** `b` <x>")), "🤖 a b <x>")
+
+    def test_markdown_long_answers_are_split_safely(self):
+        long_code = "```\n" + "\n".join("line %d %s" % (i, "x" * 60) for i in range(400)) + "\n```"
+        for text in (long_code, "word " * 4000, "- item\n" * 2000):
+            messages = bot.render([("md", text)], "off")
+            self.assertTrue(messages)
+            self.assertTrue(all(len(m) <= bot.RENDER_LIMIT + 400 for m in messages), [len(m) for m in messages])
+            for m in messages:                               # tags stay balanced inside every message
+                self.assertEqual(m.count("<pre>") + m.count("<pre "), m.count("</pre>"))
 
     def test_render_limits_and_modes(self):
         segs = [("tool", "🔧 Bash: " + "x" * 300) for _ in range(40)] + [("text", "🤖 " + "a" * 9000)]
