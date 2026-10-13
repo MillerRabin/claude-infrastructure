@@ -6,6 +6,8 @@ mirror_tools = true                            # also show "🔧 Bash: ..." line
 tool_display = "quote"                         # quote (collapsible) | spoiler (hidden until tapped) | plain | off; per topic: /tools
 default_mode = "full"                          # full = --dangerously-skip-permissions, safe = read-only tools
 run_timeout_seconds = 3600
+uploads_dir = "~/.local/state/claude-tg/uploads"   # attachments that are not put into the prompt
+max_inline_bytes = 150000                      # text files up to this size are pasted into the prompt
 claude_bin = "~/.local/bin/claude"
 state_file = "~/.local/state/claude-tg/state.json"
 

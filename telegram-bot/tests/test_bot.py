@@ -22,12 +22,19 @@ USER, OTHER, CHAT = 111, 222, -1001
 class FakeTelegram:
     def __init__(self):
         self.calls, self.updates, self.next_thread, self.next_update = [], queue.Queue(), 100, 1
-        self.deleted, self.reject_html = set(), False
+        self.deleted, self.reject_html, self.files = set(), False, {}
         fake = self
 
         class H(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
+
+            def do_GET(self):                                   # file download: /file/bot<token>/docs/<file_id>
+                data = fake.files.get(self.path.rsplit("/", 1)[-1])
+                self.send_response(200 if data is not None else 404)
+                self.end_headers()
+                if data is not None:
+                    self.wfile.write(data)
 
             def do_POST(self):
                 method = self.path.rsplit("/", 1)[-1]
@@ -39,7 +46,10 @@ class FakeTelegram:
                     body = json.dumps({"ok": False, "error_code": 400,
                                        "description": "Bad Request: message thread not found"}).encode()
                 else:
-                    body = json.dumps({"ok": True, "result": fake.handle(method, params)}).encode()
+                    try:
+                        body = json.dumps({"ok": True, "result": fake.handle(method, params)}).encode()
+                    except KeyError:
+                        body = json.dumps({"ok": False, "error_code": 400, "description": "Bad Request: wrong file_id"}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -63,14 +73,24 @@ class FakeTelegram:
                 pass
             return out
         self.calls.append((method, params))
+        if method == "getFile":
+            data = self.files.get(params["file_id"])
+            if data is None:
+                raise KeyError("no such file")
+            return {"file_id": params["file_id"], "file_size": len(data), "file_path": "docs/" + params["file_id"]}
         if method == "createForumTopic":
             self.next_thread += 1
             return {"message_thread_id": self.next_thread, "name": params["name"]}
         return True
 
-    def say(self, user, text, thread=None, chat=CHAT, chat_type="supergroup"):
-        msg = {"message_id": self.next_update, "from": {"id": user, "is_bot": False}, "text": text,
+    def say(self, user, text, thread=None, chat=CHAT, chat_type="supergroup", document=None, photo=None):
+        msg = {"message_id": self.next_update, "from": {"id": user, "is_bot": False},
                "chat": {"id": chat, "type": chat_type}}
+        if document or photo:
+            msg["caption"] = text
+            msg["document" if document else "photo"] = document or photo
+        else:
+            msg["text"] = text
         if thread:
             msg["message_thread_id"] = thread
         self.updates.put({"update_id": self.next_update, "message": msg})
@@ -102,7 +122,7 @@ FAKE_CLAUDE = textwrap.dedent('''\
     with open(os.environ["FAKE_ARGS_LOG"], "a") as f:
         f.write(json.dumps(args) + "\\n")
     with open(os.environ["FAKE_ARGS_LOG"] + ".prompts", "a") as f:
-        f.write(prompt.strip() + "\\n")
+        f.write(json.dumps(prompt.strip()) + "\\n")
     print(json.dumps({"type": "result", "is_error": False, "result": "echo: " + prompt.strip(), "session_id": sid}))
 ''')
 
@@ -146,12 +166,14 @@ class BotTest(unittest.TestCase):
             claude_bin = "%s"
             api_base = "%s"
             recent_days = 7
+            uploads_dir = "%s/uploads"
+            max_inline_bytes = 500
             [[groups]]
             name = "g"
             chat_id = %d
             config_dir = "%s"
             project_dir = "%s"
-        ''' % (self.tmp, list(allowed), self.tmp, self.claude, self.tg.url, CHAT, self.cfgdir, self.proj)))
+        ''' % (self.tmp, list(allowed), self.tmp, self.claude, self.tg.url, self.tmp, CHAT, self.cfgdir, self.proj)))
         self.bot = bot.Bot(bot.Config(cfg))
         self.bot.mirror_loop_interval = 0.2
         for target in (self.bot.poll_loop, self.bot.mirror_loop):
@@ -253,7 +275,7 @@ class BotTest(unittest.TestCase):
 
     def prompts(self):
         with open(self.args_log + ".prompts") as f:
-            return f.read().splitlines()
+            return [json.loads(line) for line in f.read().splitlines()]
 
     def test_claude_slash_commands_are_forwarded(self):
         self.start()
@@ -362,6 +384,82 @@ class BotTest(unittest.TestCase):
         self.wait(lambda: any("🔧 Bash: ls -la" in m["text"] and "parse_mode" not in m for m in self.tg.messages(thread)),
                   "plain fallback")
         self.assertFalse(any("<blockquote" in m["text"] for m in self.tg.messages(thread)[-3:]))
+
+    def test_text_attachment_goes_into_the_prompt(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.files["f1"] = "первая строка\nвторая ``` строка\n".encode()
+        self.tg.say(USER, "посмотри файл", thread=thread,
+                    document={"file_id": "f1", "file_name": "notes.txt", "mime_type": "text/plain"})
+        self.wait(lambda: os.path.exists(self.args_log + ".prompts"), "claude run")
+        prompt = self.prompts()[-1]
+        self.assertIn("посмотри файл", prompt)
+        self.assertIn("[Вложение: notes.txt]", prompt)
+        self.assertIn("первая строка", prompt)
+        self.assertIn("````", prompt)                                   # fence longer than the backticks in the file
+        self.assertIn("--resume", self.last_args())
+        self.assertIn("--add-dir", self.last_args())
+
+    def test_binary_and_large_attachments_are_saved_not_inlined(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.files["f2"] = b"\x00\x01binary" + b"x" * 50
+        self.tg.say(USER, "", thread=thread, document={"file_id": "f2", "file_name": "../../evil name.bin"})
+        self.wait(lambda: os.path.exists(self.args_log + ".prompts"), "claude run")
+        prompt = self.prompts()[-1]
+        path = prompt.split("сохранено: ")[1].split(",")[0]
+        uploads = os.path.realpath(os.path.join(self.tmp, "uploads"))
+        self.assertTrue(os.path.realpath(path).startswith(uploads + os.sep), path)   # never outside the uploads dir
+        self.assertNotIn("..", os.path.relpath(path, uploads))
+        self.assertTrue(path.endswith("evil_name.bin"))
+        with open(path, "rb") as f:
+            self.assertTrue(f.read().startswith(b"\x00\x01binary"))
+        args = self.last_args()
+        self.assertEqual(args[args.index("--add-dir") + 1], os.path.join(self.tmp, "uploads"))
+        self.tg.files["f3"] = ("long text " * 100).encode()                          # text, but above max_inline_bytes
+        self.tg.say(USER, "big", thread=thread, document={"file_id": "f3", "file_name": "big.txt", "mime_type": "text/plain"})
+        self.wait(lambda: len(self.prompts()) >= 2, "second run")
+        self.assertIn("сохранено:", self.prompts()[-1])
+        self.assertNotIn("long text long text", self.prompts()[-1])
+
+    def test_photo_is_saved_and_largest_size_used(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.files["small"], self.tg.files["large"] = b"\xff\xd8small", b"\xff\xd8large-image"
+        self.tg.say(USER, "что на фото", thread=thread, photo=[{"file_id": "small"}, {"file_id": "large"}])
+        self.wait(lambda: os.path.exists(self.args_log + ".prompts"), "claude run")
+        prompt = self.prompts()[-1]
+        self.assertIn("что на фото", prompt)
+        self.assertIn("изображение", prompt)
+        path = prompt.split("сохранено: ")[1].split(",")[0]
+        self.assertTrue(path.endswith(".jpg"))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"\xff\xd8large-image")
+
+    def test_attachment_in_general_starts_a_new_session(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "initial topic")
+        self.tg.files["f4"] = b"log line"
+        self.tg.say(USER, "", document={"file_id": "f4", "file_name": "app.log", "mime_type": "text/plain"})
+        self.wait(lambda: "app.log" in self.tg.topics(), "topic named after the file")
+        self.wait(lambda: os.path.exists(self.args_log), "claude run")
+        self.assertIn("--session-id", self.last_args())
+        self.assertIn("log line", self.prompts()[-1])
+
+    def test_attachment_from_a_stranger_is_ignored_and_failures_are_reported(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.files["f5"] = b"secret"
+        self.tg.say(OTHER, "hi", thread=thread, document={"file_id": "f5", "file_name": "a.txt", "mime_type": "text/plain"})
+        time.sleep(2)
+        self.assertFalse([1 for m, p in self.tg.calls if m == "getFile"], "a stranger's file must not even be downloaded")
+        self.assertFalse(os.path.exists(self.args_log + ".prompts"))
+        self.tg.say(USER, "", thread=thread, document={"file_id": "missing", "file_name": "x.txt"})
+        self.wait(lambda: any("Не удалось получить вложение" in t for t in self.tg.sent(thread)), "error reported")
 
     def test_claude_command_in_general_gets_a_hint(self):
         self.start()

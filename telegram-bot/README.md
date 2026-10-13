@@ -77,6 +77,11 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
   `> quotes`, links (only `http(s)`, `tg`, `mailto`) and tables (monospace, Telegram has no tables). All text is escaped.
   Telegram does not allow code inside bold/italic, so `**`x`**` becomes plain monospace `x`. If Telegram rejects a message's
   formatting, it is sent again as plain text.
+- **Attachments:** a text file (or a text file sent as a document) is placed into the prompt together with its caption, up to
+  `max_inline_bytes` (150 KB by default). Larger files, binary files and photos are saved to `uploads_dir` (mode 600, files older
+  than 14 days are removed) and Claude is told the path so it can open it with its `Read` tool (it can read images too).
+  The Bot API limit for downloads is 20 MB. Stickers, voice messages and videos are ignored. Only allowed users' files are
+  downloaded.
 - Prompts typed in Telegram are not echoed back (they are already visible); only Claude's output is mirrored.
 - Telegram limits: about 20 messages per minute per group (the bot throttles itself), 4096 characters per message
   (long answers are split into several messages, at most 12).

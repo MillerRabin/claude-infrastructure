@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 import threading
 import time
 import tomllib
@@ -84,6 +85,9 @@ class Config:
         self.api_base = raw.get("api_base", "https://api.telegram.org")
         self.run_timeout = int(raw.get("run_timeout_seconds", 3600))
         self.default_mode = raw.get("default_mode", "full")      # full | safe
+        self.uploads_dir = expand(raw.get("uploads_dir", "~/.local/state/claude-tg/uploads"))
+        self.max_inline_bytes = int(raw.get("max_inline_bytes", 150000))     # text files up to this size go into the prompt
+        self.max_download_bytes = int(raw.get("max_download_bytes", 20 * 1024 * 1024))   # Bot API limit is 20 MB
         self.tool_display = raw.get("tool_display", "quote")     # quote | spoiler | plain | off
         if self.tool_display not in TOOL_MODES:
             raise ValueError("tool_display must be one of %s" % ", ".join(TOOL_MODES))
@@ -136,6 +140,18 @@ class TG:
                 time.sleep(retry + 1)
                 continue
             raise TGError(body.get("description", "error"), body.get("error_code", 0))
+
+    def download(self, file_id, limit):
+        """Download a file sent to the bot. Returns (bytes, telegram_file_path)."""
+        info = self.call("getFile", file_id=file_id)
+        if info.get("file_size", 0) > limit:
+            raise TGError("file is larger than %d bytes" % limit)
+        url = self.url.replace("/bot", "/file/bot", 1) + info["file_path"]
+        with urllib.request.urlopen(url, timeout=120) as r:
+            data = r.read(limit + 1)
+        if len(data) > limit:
+            raise TGError("file is larger than %d bytes" % limit)
+        return data, info["file_path"]
 
     def send_html(self, chat_id, html, thread=None):
         self._throttle(chat_id)
@@ -247,6 +263,37 @@ def parse_line(line, mirror_tools=True):
 
 def norm(text):
     return " ".join(text.split())
+
+
+# --------------------------------------------------------------------------- attachments
+
+TEXT_EXT = {".txt", ".md", ".log", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".csv", ".tsv", ".xml", ".html",
+            ".py", ".sh", ".js", ".ts", ".sql", ".go", ".rs", ".c", ".h", ".cpp", ".java", ".env", ".service", ".patch", ".diff"}
+
+
+def safe_name(name, default="file"):
+    name = os.path.basename((name or "").replace("\\", "/")) or default
+    name = re.sub(r"[^\w.-]", "_", name)[:80].lstrip(".") or default
+    return name
+
+
+def decode_text(data, name, mime):
+    """The text of a file when it is text, else None."""
+    ext = os.path.splitext(name)[1].lower()
+    if b"\x00" in data[:4096]:
+        return None
+    if not ((mime or "").startswith("text/") or ext in TEXT_EXT or mime in ("application/json", "application/xml")):
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def fenced(text):
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return "%s\n%s\n%s" % (fence, text.rstrip("\n"), fence)
 
 
 # --------------------------------------------------------------------------- rendering
@@ -661,6 +708,8 @@ class Bot:
         cmd += ["--session-id", sid] if new else ["--resume", sid]
         if model:
             cmd += ["--model", model]
+        os.makedirs(self.cfg.uploads_dir, mode=0o700, exist_ok=True)
+        cmd += ["--add-dir", self.cfg.uploads_dir]
         if mode == "safe":
             cmd += ["--permission-mode", "default", "--allowedTools", "Read", "Glob", "Grep"]
         else:
@@ -725,15 +774,52 @@ class Bot:
                 for message in render([("md", result)], "off"):
                     self.send_topic(group, sid, st, message, html=True)
 
+    # ---- attachments ------------------------------------------------------------
+    def cleanup_uploads(self, max_age_days=14):
+        now = time.time()
+        for root, _dirs, files in os.walk(self.cfg.uploads_dir):
+            for f in files:
+                path = os.path.join(root, f)
+                if now - os.path.getmtime(path) > max_age_days * 86400:
+                    os.remove(path)
+
+    def attachment_prompt(self, group, msg, caption):
+        """Download the attachment of a message and build the prompt for Claude (None = no usable attachment)."""
+        self.cleanup_uploads()
+        doc, photos = msg.get("document"), msg.get("photo")
+        if doc:
+            file_id, name, mime = doc["file_id"], safe_name(doc.get("file_name")), doc.get("mime_type") or ""
+        elif photos:
+            file_id, name, mime = photos[-1]["file_id"], "photo-%s.jpg" % time.strftime("%Y%m%d-%H%M%S"), "image/jpeg"
+        else:
+            return None
+        data, _tg_path = self.tg.download(file_id, self.cfg.max_download_bytes)
+        text = decode_text(data, name, mime) if len(data) <= self.cfg.max_inline_bytes else None
+        head = caption.strip()
+        if text is not None:
+            return (head + "\n\n" if head else "") + "[Вложение: %s]\n%s" % (name, fenced(text))
+        folder = os.path.join(self.cfg.uploads_dir, group.name, time.strftime("%Y%m%d"))
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        path = os.path.join(folder, "%s-%s" % (time.strftime("%H%M%S"), name))
+        if not os.path.realpath(path).startswith(os.path.realpath(self.cfg.uploads_dir) + os.sep):
+            raise TGError("bad file name")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)           # readable by the bot's user only
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        kind = "изображение" if mime.startswith("image/") else "файл"
+        note = "[Вложение (%s) сохранено: %s, %d байт. Открой его инструментом Read, если нужно.]" % (kind, path, len(data))
+        return (head + "\n\n" if head else "") + note
+
     # ---- telegram updates -------------------------------------------------------
     def reply(self, msg, text):
         self.tg.send(msg["chat"]["id"], text, msg.get("message_thread_id"))
 
     def handle(self, msg):
         user, chat = msg.get("from") or {}, msg["chat"]
-        text = (msg.get("text") or "").strip()
-        cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
-        if user.get("is_bot") or not text:
+        has_file = bool(msg.get("document") or msg.get("photo"))
+        text = (msg.get("text") or msg.get("caption") or "").strip()
+        cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") and not has_file else ""
+        if user.get("is_bot") or not (text or has_file):
             return
         if cmd == "/whoami" and (not self.cfg.allowed or user.get("id") in self.cfg.allowed):
             self.reply(msg, "user id: %s\nchat id: %s\nthread: %s" %
@@ -749,6 +835,15 @@ class Bot:
         thread = msg.get("message_thread_id")
         if thread == 1:                               # id of the General topic
             thread = None
+        if has_file:                                  # attachment: becomes (part of) the prompt
+            try:
+                text = self.attachment_prompt(group, msg, text)
+            except Exception as e:
+                log.warning("attachment: %s", e)
+                return self.reply(msg, "⚠️ Не удалось получить вложение: %s" % short(str(e), 200))
+            if not text:
+                return
+            cmd = ""
         args = text.split()[1:]
         slash = False
         if text.startswith("//"):                     # "//help" sends "/help" to Claude even if the bot has its own
@@ -808,7 +903,8 @@ class Bot:
             self.reply(msg, "Команды Claude (%s) выполняются в теме сессии: откройте тему и отправьте её там." % text.split()[0])
         else:                                         # General: a new session
             sid = str(uuid.uuid4())
-            st = self.create_topic(group, sid, short(text, 60), 0)
+            title = short(msg.get("caption") or (msg.get("document") or {}).get("file_name") or text, 60)
+            st = self.create_topic(group, sid, title, 0)
             self.run_claude(group, sid, st, text, new=True)
 
     def cmd_tools(self, group, msg, thread, args):
