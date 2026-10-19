@@ -83,9 +83,11 @@ class FakeTelegram:
             return {"message_thread_id": self.next_thread, "name": params["name"]}
         return True
 
-    def say(self, user, text, thread=None, chat=CHAT, chat_type="supergroup", document=None, photo=None):
+    def say(self, user, text, thread=None, chat=CHAT, chat_type="supergroup", document=None, photo=None, album=None):
         msg = {"message_id": self.next_update, "from": {"id": user, "is_bot": False},
                "chat": {"id": chat, "type": chat_type}}
+        if album:
+            msg["media_group_id"] = album
         if document or photo:
             msg["caption"] = text
             msg["document" if document else "photo"] = document or photo
@@ -168,6 +170,7 @@ class BotTest(unittest.TestCase):
             recent_days = 7
             uploads_dir = "%s/uploads"
             max_inline_bytes = 500
+            album_wait_seconds = 0.6
             [[groups]]
             name = "g"
             chat_id = %d
@@ -448,6 +451,60 @@ class BotTest(unittest.TestCase):
         self.wait(lambda: os.path.exists(self.args_log), "claude run")
         self.assertIn("--session-id", self.last_args())
         self.assertIn("log line", self.prompts()[-1])
+
+    def uploaded(self):
+        found = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "uploads")):
+            found += [os.path.join(root, f) for f in files]
+        return sorted(found)
+
+    def test_files_sent_in_the_same_second_never_overwrite_each_other(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        for i in range(4):                                             # same file name, same second, different content
+            self.tg.files["same%d" % i] = b"\x00data-%d" % i + b"x" * 30
+            self.tg.say(USER, "doc %d" % i, thread=thread, document={"file_id": "same%d" % i, "file_name": "report.bin"})
+        for i in range(3):                                             # photos without file_unique_id
+            self.tg.files["ph%d" % i] = b"\xff\xd8photo-%d" % i
+            self.tg.say(USER, "photo %d" % i, thread=thread, photo=[{"file_id": "ph%d" % i}])
+        self.wait(lambda: os.path.exists(self.args_log + ".prompts") and len(self.prompts()) >= 7, "seven runs", timeout=40)
+        files = self.uploaded()
+        self.assertEqual(len(files), 7, files)                         # nothing was overwritten
+        contents = sorted(open(f, "rb").read() for f in files)
+        self.assertEqual(len(set(contents)), 7)
+        for i in range(4):
+            self.assertIn(b"\x00data-%d" % i + b"x" * 30, contents)
+
+    def test_album_of_photos_is_one_prompt_with_distinct_files(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        for i in range(3):
+            self.tg.files["al%d" % i] = b"\xff\xd8album-photo-%d" % i
+            self.tg.say(USER, "сравни эти фото" if i == 0 else "", thread=thread,
+                        photo=[{"file_id": "al%d" % i, "file_unique_id": "u%d" % i}], album="grp-1")
+        self.wait(lambda: os.path.exists(self.args_log + ".prompts"), "one run for the album")
+        time.sleep(2.5)                                                # no second run may follow
+        prompts = self.prompts()
+        self.assertEqual(len(prompts), 1, prompts)
+        self.assertIn("сравни эти фото", prompts[0])
+        self.assertIn("Получено вложений: 3", prompts[0])
+        paths = [p.split("сохранено: ")[1].split(",")[0] for p in prompts[0].split("\n\n") if "сохранено:" in p]
+        self.assertEqual(len(paths), 3)
+        self.assertEqual(len(set(paths)), 3)
+        self.assertEqual(sorted(open(p, "rb").read() for p in paths),
+                         [b"\xff\xd8album-photo-0", b"\xff\xd8album-photo-1", b"\xff\xd8album-photo-2"])
+
+    def test_album_from_a_stranger_is_ignored(self):
+        self.start()
+        self.wait(lambda: self.tg.topics(), "topic created")
+        thread = self.thread_of("Old topic")
+        self.tg.files["x1"] = b"\xff\xd8x"
+        self.tg.say(OTHER, "hi", thread=thread, photo=[{"file_id": "x1"}], album="grp-2")
+        time.sleep(2)
+        self.assertFalse([1 for m, p in self.tg.calls if m == "getFile"])
+        self.assertFalse(os.path.exists(self.args_log + ".prompts"))
 
     def test_attachment_from_a_stranger_is_ignored_and_failures_are_reported(self):
         self.start()

@@ -8,6 +8,7 @@ default_mode = "full"                          # full = --dangerously-skip-permi
 run_timeout_seconds = 3600
 uploads_dir = "~/.local/state/claude-tg/uploads"   # attachments that are not put into the prompt
 max_inline_bytes = 150000                      # text files up to this size are pasted into the prompt
+album_wait_seconds = 2.0                       # pause after the last photo of an album before the bot answers
 claude_bin = "~/.local/bin/claude"
 state_file = "~/.local/state/claude-tg/state.json"
 

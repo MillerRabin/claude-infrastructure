@@ -86,6 +86,8 @@ class Config:
         self.run_timeout = int(raw.get("run_timeout_seconds", 3600))
         self.default_mode = raw.get("default_mode", "full")      # full | safe
         self.uploads_dir = expand(raw.get("uploads_dir", "~/.local/state/claude-tg/uploads"))
+        self.album_wait = float(raw.get("album_wait_seconds", 2.0))          # pause that closes an album
+        self.album_max_wait = float(raw.get("album_max_wait_seconds", 8.0))
         self.max_inline_bytes = int(raw.get("max_inline_bytes", 150000))     # text files up to this size go into the prompt
         self.max_download_bytes = int(raw.get("max_download_bytes", 20 * 1024 * 1024))   # Bot API limit is 20 MB
         self.tool_display = raw.get("tool_display", "quote")     # quote | spoiler | plain | off
@@ -539,6 +541,7 @@ class Bot:
         self.procs = {}
         self.bot_prompts = collections.defaultdict(collections.deque)   # prompts sent through Telegram
         self.backoff = {}                                               # group -> time before which it is skipped
+        self.albums, self.album_lock = {}, threading.Lock()             # media_group_id -> collected messages
         self.stop = threading.Event()
 
     # ---- topics -----------------------------------------------------------------
@@ -783,32 +786,77 @@ class Bot:
                 if now - os.path.getmtime(path) > max_age_days * 86400:
                     os.remove(path)
 
-    def attachment_prompt(self, group, msg, caption):
-        """Download the attachment of a message and build the prompt for Claude (None = no usable attachment)."""
-        self.cleanup_uploads()
-        doc, photos = msg.get("document"), msg.get("photo")
-        if doc:
-            file_id, name, mime = doc["file_id"], safe_name(doc.get("file_name")), doc.get("mime_type") or ""
-        elif photos:
-            file_id, name, mime = photos[-1]["file_id"], "photo-%s.jpg" % time.strftime("%Y%m%d-%H%M%S"), "image/jpeg"
-        else:
-            return None
-        data, _tg_path = self.tg.download(file_id, self.cfg.max_download_bytes)
-        text = decode_text(data, name, mime) if len(data) <= self.cfg.max_inline_bytes else None
-        head = caption.strip()
-        if text is not None:
-            return (head + "\n\n" if head else "") + "[Вложение: %s]\n%s" % (name, fenced(text))
+    def save_upload(self, group, name, data):
+        """Write a file into the uploads dir under a name that never replaces an existing file."""
         folder = os.path.join(self.cfg.uploads_dir, group.name, time.strftime("%Y%m%d"))
         os.makedirs(folder, mode=0o700, exist_ok=True)
-        path = os.path.join(folder, "%s-%s" % (time.strftime("%H%M%S"), name))
-        if not os.path.realpath(path).startswith(os.path.realpath(self.cfg.uploads_dir) + os.sep):
-            raise TGError("bad file name")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)           # readable by the bot's user only
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        kind = "изображение" if mime.startswith("image/") else "файл"
-        note = "[Вложение (%s) сохранено: %s, %d байт. Открой его инструментом Read, если нужно.]" % (kind, path, len(data))
-        return (head + "\n\n" if head else "") + note
+        stem, ext = os.path.splitext("%s-%s" % (time.strftime("%H%M%S"), name))
+        root = os.path.realpath(self.cfg.uploads_dir) + os.sep
+        for i in range(1000):
+            path = os.path.join(folder, stem + ("" if i == 0 else "-%d" % i) + ext)
+            if not os.path.realpath(path).startswith(root):
+                raise TGError("bad file name")
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)       # fails if the file exists
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            return path
+        raise TGError("cannot find a free file name")
+
+    def attachment_prompt(self, group, msgs, caption):
+        """Download the attachments of one message or of a whole album and build the prompt for Claude."""
+        self.cleanup_uploads()
+        parts = []
+        for msg in msgs:
+            doc, photos = msg.get("document"), msg.get("photo")
+            if doc:
+                file_id, name, mime = doc["file_id"], safe_name(doc.get("file_name")), doc.get("mime_type") or ""
+            elif photos:
+                uid = safe_name(photos[-1].get("file_unique_id") or uuid.uuid4().hex[:10], "photo")
+                file_id, name, mime = photos[-1]["file_id"], "photo-%s.jpg" % uid, "image/jpeg"
+            else:
+                continue
+            data, _tg_path = self.tg.download(file_id, self.cfg.max_download_bytes)
+            text = decode_text(data, name, mime) if len(data) <= self.cfg.max_inline_bytes else None
+            if text is not None:
+                parts.append("[Вложение: %s]\n%s" % (name, fenced(text)))
+                continue
+            path = self.save_upload(group, name, data)
+            kind = "изображение" if mime.startswith("image/") else "файл"
+            parts.append("[Вложение (%s) сохранено: %s, %d байт. Открой его инструментом Read, если нужно.]" %
+                         (kind, path, len(data)))
+        if not parts:
+            return None
+        if len(parts) > 1:
+            parts.insert(0, "[Получено вложений: %d]" % len(parts))
+        head = caption.strip()
+        return (head + "\n\n" if head else "") + "\n\n".join(parts)
+
+    # ---- albums: several photos sent at once arrive as separate messages with one media_group_id ----
+    def queue_album(self, msg):
+        key = (msg["chat"]["id"], msg.get("message_thread_id"), msg["media_group_id"])
+        with self.album_lock:
+            entry = self.albums.setdefault(key, {"msgs": [], "timer": None, "first": time.time()})
+            entry["msgs"].append(msg)
+            if entry["timer"]:
+                entry["timer"].cancel()
+            wait = 0 if time.time() - entry["first"] > self.cfg.album_max_wait else self.cfg.album_wait
+            entry["timer"] = threading.Timer(wait, self.flush_album, args=(key,))
+            entry["timer"].daemon = True
+            entry["timer"].start()
+
+    def flush_album(self, key):
+        with self.album_lock:
+            entry = self.albums.pop(key, None)
+        if not entry:
+            return
+        msgs = sorted(entry["msgs"], key=lambda m: m.get("message_id", 0))
+        first = dict(msgs[0])
+        first["_album"] = msgs
+        first["caption"] = next((m["caption"] for m in msgs if m.get("caption")), "")
+        self.safe_handle(first)
 
     # ---- telegram updates -------------------------------------------------------
     def reply(self, msg, text):
@@ -816,7 +864,7 @@ class Bot:
 
     def handle(self, msg):
         user, chat = msg.get("from") or {}, msg["chat"]
-        has_file = bool(msg.get("document") or msg.get("photo"))
+        has_file = bool(msg.get("document") or msg.get("photo") or msg.get("_album"))
         text = (msg.get("text") or msg.get("caption") or "").strip()
         cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") and not has_file else ""
         if user.get("is_bot") or not (text or has_file):
@@ -835,9 +883,11 @@ class Bot:
         thread = msg.get("message_thread_id")
         if thread == 1:                               # id of the General topic
             thread = None
+        if has_file and msg.get("media_group_id") and "_album" not in msg:
+            return self.queue_album(msg)              # wait for the other photos of the album
         if has_file:                                  # attachment: becomes (part of) the prompt
             try:
-                text = self.attachment_prompt(group, msg, text)
+                text = self.attachment_prompt(group, msg.get("_album") or [msg], text)
             except Exception as e:
                 log.warning("attachment: %s", e)
                 return self.reply(msg, "⚠️ Не удалось получить вложение: %s" % short(str(e), 200))

@@ -80,6 +80,9 @@ can run any command as the bot's Linux user** (here `millerrabin`, with access t
 - **Attachments:** a text file (or a text file sent as a document) is placed into the prompt together with its caption, up to
   `max_inline_bytes` (150 KB by default). Larger files, binary files and photos are saved to `uploads_dir` (mode 600, files older
   than 14 days are removed) and Claude is told the path so it can open it with its `Read` tool (it can read images too).
+  Saved files never replace each other: the name contains the time and Telegram's unique file id, and an existing name gets a
+  numeric suffix. Several photos sent at once (an album) arrive as separate Telegram messages; the bot waits
+  `album_wait_seconds` (2 s) after the last one and answers **one** prompt for the whole album, with the caption.
   The Bot API limit for downloads is 20 MB. Stickers, voice messages and videos are ignored. Only allowed users' files are
   downloaded.
 - Prompts typed in Telegram are not echoed back (they are already visible); only Claude's output is mirrored.
