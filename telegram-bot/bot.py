@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import shutil
@@ -32,6 +33,16 @@ RENDER_LIMIT = 3600                      # characters of HTML per message (Teleg
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$")     # alias (sonnet, opus, opusplan, ...) or a full model id   # everything else goes to Claude
 MAX_CHUNK = 3800            # Telegram limit is 4096 characters
 MAX_CHUNKS = 12
+
+
+def force_ipv4():
+    """Resolve host names to IPv4 only. Some hosts have a dead IPv6 path to Telegram (ping works, TCP never connects):
+    the first address would then eat the whole connect timeout on every request."""
+    original = socket.getaddrinfo
+
+    def ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+        return original(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = ipv4_only
 
 
 def expand(p):
@@ -90,6 +101,7 @@ class Config:
         self.album_max_wait = float(raw.get("album_max_wait_seconds", 8.0))
         self.max_inline_bytes = int(raw.get("max_inline_bytes", 150000))     # text files up to this size go into the prompt
         self.max_download_bytes = int(raw.get("max_download_bytes", 20 * 1024 * 1024))   # Bot API limit is 20 MB
+        self.ipv4_only = bool(raw.get("ipv4_only", True))        # talk to Telegram over IPv4 only
         self.tool_display = raw.get("tool_display", "quote")     # quote | spoiler | plain | off
         if self.tool_display not in TOOL_MODES:
             raise ValueError("tool_display must be one of %s" % ", ".join(TOOL_MODES))
@@ -535,6 +547,8 @@ def strip_tags(h):
 
 class Bot:
     def __init__(self, cfg):
+        if cfg.ipv4_only:
+            force_ipv4()
         self.cfg, self.tg, self.state = cfg, TG(cfg.api_base, cfg.token), State(cfg.state_file)
         self.groups = {g.chat_id: g for g in cfg.groups}
         self.sid_locks = collections.defaultdict(threading.Lock)

@@ -638,6 +638,19 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(bot.render([("tool", "🔧 x")], "off"), [])
         self.assertEqual(bot.strip_tags("<blockquote expandable>a &lt;b&gt;</blockquote>"), "a <b>")
 
+    def test_force_ipv4_resolves_only_ipv4(self):
+        import socket
+        original = socket.getaddrinfo
+        try:
+            bot.force_ipv4()
+            infos = socket.getaddrinfo("localhost", 80, type=socket.SOCK_STREAM)
+            self.assertTrue(infos)
+            self.assertEqual({i[0] for i in infos}, {socket.AF_INET})
+            infos = socket.getaddrinfo("localhost", 80, socket.AF_INET6, socket.SOCK_STREAM)   # even when IPv6 is asked for
+            self.assertEqual({i[0] for i in infos}, {socket.AF_INET})
+        finally:
+            socket.getaddrinfo = original
+
     def test_chunks(self):
         self.assertEqual(bot.chunks("short"), ["short"])
         parts = bot.chunks("line\n" * 2000)

@@ -6,6 +6,7 @@ mirror_tools = true                            # also show "🔧 Bash: ..." line
 tool_display = "quote"                         # quote (collapsible) | spoiler (hidden until tapped) | plain | off; per topic: /tools
 default_mode = "full"                          # full = --dangerously-skip-permissions, safe = read-only tools
 run_timeout_seconds = 3600
+ipv4_only = true                               # reach Telegram over IPv4 only (a dead IPv6 path made every request wait for a timeout)
 uploads_dir = "~/.local/state/claude-tg/uploads"   # attachments that are not put into the prompt
 max_inline_bytes = 150000                      # text files up to this size are pasted into the prompt
 album_wait_seconds = 2.0                       # pause after the last photo of an album before the bot answers
