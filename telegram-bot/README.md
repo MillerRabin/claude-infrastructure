@@ -13,10 +13,16 @@ you continue them from the phone.
   session bound to that topic.
 - Only the Telegram user ids in `allowed_user_ids` can do anything. Everybody else is ignored silently.
 
+> **Where it runs.** On `deploy.int-t.com` under the dedicated unprivileged user `claude` (no sudo, no `docker` group; an ACL
+> denies it `/home/ci`, the unit adds `NoNewPrivileges`, `InaccessiblePaths` and memory/task limits). It used to run on an
+> Orange Pi. The unit in this repository is the deploy version. The VPN side (tunnels, split DNS for the FSK domains) is
+> described in the `infrastructure` repository (`vpn/README.md`).
+
 ## Security: read this first
 
 `default_mode = "full"` runs Claude with `--dangerously-skip-permissions`: **a message from an allowed Telegram account
-can run any command as the bot's Linux user** (here `millerrabin`, with access to the VPN tunnels and servers).
+can run any command as the bot's Linux user** (here `claude`: it can use the VPN tunnels and the servers behind them, and read
+everything in its own home, including the SSH keys and tokens copied there).
 
 - `allowed_user_ids` must contain only your own account. With an empty list the bot is in **setup mode** and executes nothing.
 - Keep the token in `~/.config/claude-tg/token` (mode 600). Anyone with the token can read the messages the bot sees.
