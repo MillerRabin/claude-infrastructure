@@ -1,0 +1,27 @@
+[Unit]
+Description=Telegram front-end for Claude Code sessions (home infrastructure, Orange Pi)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/claude/.config/claude-tg/token
+
+[Service]
+User=claude
+Group=claude
+Environment=HOME=/home/claude
+WorkingDirectory=/home/claude
+ExecStart=/usr/bin/python3 /home/claude/claude-tg-bot/bot.py /home/claude/.config/claude-tg/config.toml
+Restart=always
+RestartSec=10
+# Claude runs with full permissions inside the home network: no sudo, no access to other users' homes
+NoNewPrivileges=yes
+InaccessiblePaths=-/home/ci -/home/millerrabin -/root
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryMax=2G
+TasksMax=512
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target
