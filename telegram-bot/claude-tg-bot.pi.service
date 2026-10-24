@@ -1,7 +1,7 @@
 [Unit]
 Description=Telegram front-end for Claude Code sessions (home infrastructure, Orange Pi)
-After=network-online.target
-Wants=network-online.target
+# no network-online.target: the board has no Ethernet cable, wait-online would block until its timeout; Restart=always covers a late Wi-Fi
+After=network.target
 ConditionPathExists=/home/claude/.config/claude-tg/token
 
 [Service]
