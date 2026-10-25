@@ -1,19 +1,46 @@
 #!/usr/bin/env python3
-"""Map the ft5x06 capacitive buttons (touches with Y > 1919) to key presses."""
-import fcntl, os, struct, sys, time
+"""Map the ft5x06 capacitive buttons (touches below the screen) to key presses."""
+import fcntl, os, struct, sys, time, tomllib
 
-TOUCH_DEV = "/dev/input/event1"
-SCREEN_MAX_Y = 1919
-KEY_A, KEY_LEFT, KEY_LEFTALT, KEY_LEFTMETA = 30, 105, 56, 125
-# (max X of zone, keys pressed together)
-ZONES = [(350, [KEY_LEFTMETA, KEY_A]), (650, [KEY_LEFTMETA]), (9999, [KEY_LEFTALT, KEY_LEFT])]
-DEBOUNCE = 0.3  # seconds; ignore repeated presses of the same button
+CONFIG = os.environ.get("CAPKEYS_CONFIG", "/etc/capkeys.conf")
+
+KEYS = {
+    "ESC": 1, "TAB": 15, "ENTER": 28, "LEFTCTRL": 29, "A": 30, "LEFTSHIFT": 42, "LEFTALT": 56, "SPACE": 57,
+    "F4": 62, "HOME": 102, "UP": 103, "LEFT": 105, "RIGHT": 106, "DOWN": 108, "LEFTMETA": 125, "MENU": 139,
+    "BACK": 158, "HOMEPAGE": 172, "APPSELECT": 580,
+}
 
 EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
 ABS_MT_SLOT, ABS_MT_X, ABS_MT_Y, ABS_MT_ID = 47, 53, 54, 57
 
 UI_SET_EVBIT, UI_SET_KEYBIT = 0x40045564, 0x40045565
 UI_DEV_CREATE, UI_DEV_DESTROY = 0x5501, 0x5502
+
+
+def load_config():
+    with open(CONFIG, "rb") as f:
+        cfg = tomllib.load(f)
+    zones = []
+    for b in sorted(cfg["buttons"], key=lambda b: b["max_x"]):
+        keys = [k if isinstance(k, int) else KEYS[k.upper()] for k in b["keys"]]
+        zones.append((b["max_x"], keys))
+    return {
+        "device_name": cfg.get("device_name", "generic ft5x06"),
+        "screen_max_y": cfg.get("screen_max_y", 1919),
+        "debounce": cfg.get("debounce", 0.3),
+        "zones": zones,
+    }
+
+
+def find_device(name):
+    """Return /dev/input/eventN of the first input device whose name contains `name`."""
+    with open("/proc/bus/input/devices") as f:
+        for block in f.read().split("\n\n"):
+            if f'Name="' in block and name in block.split('Name="', 1)[1].split('"', 1)[0]:
+                for token in block.split("Handlers=", 1)[1].split():
+                    if token.startswith("event"):
+                        return "/dev/input/" + token
+    raise SystemExit("input device %r not found" % name)
 
 
 def make_keyboard(keys):
@@ -36,9 +63,12 @@ def emit(fd, keys, value):
 
 
 def main():
-    all_keys = sorted({k for _, ks in ZONES for k in ks})
-    ui = make_keyboard(all_keys)
-    ts = open(TOUCH_DEV, "rb", buffering=0)
+    cfg = load_config()
+    zones, max_y, debounce = cfg["zones"], cfg["screen_max_y"], cfg["debounce"]
+    dev = find_device(cfg["device_name"])
+    print("reading %s (%s)" % (dev, cfg["device_name"]), flush=True)
+    ui = make_keyboard(sorted({k for _, ks in zones for k in ks}))
+    ts = open(dev, "rb", buffering=0)
     slot = 0
     pos = {}       # slot -> [x, y]; last reported values persist between touches
     new = set()    # slots with a new touch awaiting SYN
@@ -67,10 +97,10 @@ def main():
             elif t == EV_SYN and new:
                 for s in new:
                     x, y = pos.get(s, [0, 0])
-                    if y > SCREEN_MAX_Y:
-                        keys = next(ks for mx, ks in ZONES if x < mx)
+                    if y > max_y:
+                        keys = next((ks for mx, ks in zones if x < mx), zones[-1][1])
                         now = time.monotonic()
-                        if now - last.get(tuple(keys), 0) < DEBOUNCE:
+                        if now - last.get(tuple(keys), 0) < debounce:
                             continue
                         last[tuple(keys)] = now
                         active[s] = keys
