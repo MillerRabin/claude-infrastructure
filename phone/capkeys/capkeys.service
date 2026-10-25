@@ -1,0 +1,9 @@
+[Unit]
+Description=Capacitive buttons to key presses
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/capkeys.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

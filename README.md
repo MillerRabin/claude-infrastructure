@@ -38,3 +38,8 @@ The Telegram bot (below) does not need them.
 [`telegram-bot/`](telegram-bot) is a Telegram front-end for both Claude accounts: one supergroup per account, one topic per
 session, mirroring of new messages and the ability to continue a session from the phone. See
 [`telegram-bot/README.md`](telegram-bot/README.md) (read the security section first).
+
+## Phone
+
+[`phone/capkeys/`](phone/capkeys) makes the capacitive buttons work on the postmarketOS phone (Phosh). See
+[`phone/capkeys/README.md`](phone/capkeys/README.md).
